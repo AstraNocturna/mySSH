@@ -15,6 +15,7 @@ mod mcp;
 mod mcp_files;
 mod mcp_jobs;
 mod mcp_policy;
+mod mcp_recipes;
 mod mcp_terminal;
 mod mcp_text;
 mod mcp_ui;

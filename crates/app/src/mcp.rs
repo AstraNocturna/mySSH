@@ -111,7 +111,8 @@ fn tool_group_key(name: &str) -> Option<&'static str> {
     match name {
         "list_sessions" => Some("list_sessions"),
         // 后台命令执行的同样是任意命令：与 ssh_exec 同组
-        "ssh_exec" | "job_start" | "job_read" | "job_stop" | "job_list" => Some("ssh_exec"),
+        "ssh_exec" | "job_start" | "job_read" | "job_stop" | "job_list" | "recipe_list"
+        | "recipe_run" => Some("ssh_exec"),
         "terminal_open" | "terminal_send" | "terminal_read" | "terminal_close"
         | "terminal_list" => Some("terminal"),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "file_view" | "file_grep"
@@ -759,6 +760,30 @@ fn tools_list(perms: &McpPerms) -> Value {
                 }
             },
             {
+                "name": "recipe_list",
+                "description": "列出内置运维 recipe（参数化命令模板）：id、说明、风险等级（read/change/danger）、参数及校验规则、命令模板。read 级在只读档也可执行（模板固定、参数严格校验），比自由命令更易获批",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "recipe_run",
+                "description": "在 SSH 会话上执行内置 recipe。参数按白名单校验后单引号代入。风险判定：read 任意档位放行；change 只读档拒绝、标准档及生产会话需确认、完全档放行；danger 只读档拒绝、其余档位一律需用户确认（可能返回 status=pending_approval，用相同参数重调继续等待）。输出同 ssh_exec，并附实际执行的 command",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "会话档案 id（list_sessions 返回的 id）" },
+                        "recipe": { "type": "string", "description": "recipe id（recipe_list 返回）" },
+                        "params": { "type": "object", "description": "recipe 参数，键为参数名", "additionalProperties": { "type": ["string", "integer"] } },
+                        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 120000, "default": 30000 }
+                    },
+                    "required": ["session_id", "recipe"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "job_start",
                 "description": "在已保存的 SSH 会话上后台启动一条长时间运行的命令（构建、tail -f、长下载等），立即返回 jobId，不等待结束。命令门与 ssh_exec 相同（需确认时返回 status=pending_approval，用相同参数重调继续等待）。每会话最多 3 个运行中任务。输出用 job_read 分段读取，job_stop 停止。仅 SSH 会话。",
                 "inputSchema": {
@@ -1156,7 +1181,8 @@ fn tool_annotations(name: &str) -> Value {
         "list_sessions" => (true, false, true, false),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "sftp_transfer_list"
         | "terminal_read" => (true, false, true, true),
-        "terminal_list" | "file_backups" | "job_list" => (true, false, true, false),
+        "terminal_list" | "file_backups" | "job_list" | "recipe_list" => (true, false, true, false),
+        "recipe_run" => (false, true, false, true),
         "job_read" => (true, false, true, true),
         "job_start" => (false, true, false, true),
         "job_stop" => (false, true, true, true),
@@ -1203,6 +1229,11 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
             Err(e) => err_content(e),
         },
         "ssh_exec" => match ssh_exec_tool(st, args).await {
+            Ok(text) => ok_content(text),
+            Err(e) => err_content(e),
+        },
+        "recipe_list" => ok_content(crate::mcp_recipes::list_json().to_string()),
+        "recipe_run" => match recipe_run_tool(st, args).await {
             Ok(text) => ok_content(text),
             Err(e) => err_content(e),
         },
@@ -1292,7 +1323,7 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    if let Gate::Pending(resp) = exec_gate(st, session_id, command, "ssh_exec").await? {
+    if let Gate::Pending(resp) = exec_gate(st, session_id, command, "ssh_exec", None).await? {
         return Ok(resp);
     }
 
@@ -1300,8 +1331,22 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
     if matches!(target, crate::sessions::ResolvedTarget::Local(_)) {
         return Err("本地会话不支持 ssh_exec（仅 SSH 会话）".into());
     }
+    let body = run_exec(st, session_id, command, timeout_ms, strip, "mcp_ssh_exec").await?;
+    serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
+}
 
-    tracing::info!(session_id, timeout_ms, "MCP ssh_exec 开始执行");
+/// 已过命令门的一次性执行：Exec Transport（PR-14 复用连接，MCP 配额）→ exec channel 收集；
+/// 结果（含超时/错误）落审计
+async fn run_exec(
+    st: &ServerState,
+    session_id: &str,
+    command: &str,
+    timeout_ms: u64,
+    strip: bool,
+    action: &str,
+) -> Result<Value, String> {
+    let store = &st.store;
+    tracing::info!(session_id, timeout_ms, action, "MCP 命令开始执行");
     let started = Instant::now();
     let run = async {
         let ctx = crate::exec::ensure_exec_ctx(&st.exec, store, session_id).await?;
@@ -1322,20 +1367,46 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
     mcp_audit(
         st,
         session_id,
-        "mcp_ssh_exec",
+        action,
         &json!({ "command": command, "result": result_flag, "durationMs": elapsed, "detail": detail }),
     )
     .await;
     match result {
         Ok(Ok(mut body)) => {
             body["durationMs"] = json!(elapsed);
-            serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
+            Ok(body)
         }
         Ok(Err(e)) => Err(e),
         Err(_) => Err(format!("命令执行超时（{timeout_ms} ms），连接已断开")),
     }
 }
 
+/// recipe_run：渲染内置模板 → 按风险等级过命令门 → 与 ssh_exec 同一执行通路
+async fn recipe_run_tool(st: &ServerState, args: &Value) -> Result<String, String> {
+    let session_id = req_str(args, "session_id", "recipe_run")?;
+    let id = req_str(args, "recipe", "recipe_run")?;
+    let params = args.get("params").cloned().unwrap_or(Value::Null);
+    let (recipe, command) = crate::mcp_recipes::render(id, &params)?;
+    let timeout_ms = args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
+        .clamp(1, MAX_TIMEOUT_MS);
+    if let Gate::Pending(resp) =
+        exec_gate(st, session_id, &command, "recipe_run", Some(recipe.risk)).await?
+    {
+        return Ok(resp);
+    }
+    let target = crate::sessions::resolve_session_target(&st.store, session_id).await?;
+    if matches!(target, crate::sessions::ResolvedTarget::Local(_)) {
+        return Err("本地会话不支持 recipe_run（仅 SSH 会话）".into());
+    }
+    let mut body = run_exec(st, session_id, &command, timeout_ms, true, "mcp_recipe_run").await?;
+    body["recipe"] = json!(recipe.id);
+    body["risk"] = json!(recipe.risk.as_str());
+    body["command"] = json!(command);
+    serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
+}
 enum Gate {
     /// 放行，继续执行
     Go,
@@ -1350,6 +1421,7 @@ async fn exec_gate(
     session_id: &str,
     command: &str,
     tool: &str,
+    recipe_risk: Option<crate::mcp_recipes::Risk>,
 ) -> Result<Gate, String> {
     let action = format!("mcp_{tool}");
     // 安全模型第 6 条：每会话命令速率上限（拒绝也计数，防探测洪泛）
@@ -1368,7 +1440,11 @@ async fn exec_gate(
     let rec = st.store.sessions().get(session_id).await.ok();
     let eff = session_effective(st, rec.as_ref()).await;
     let level = crate::mcp_policy::level_str(eff.level);
-    let deny_reason = match st.policy.classify(command, eff.level, eff.production) {
+    let verdict = match recipe_risk {
+        Some(risk) => crate::mcp_recipes::verdict(risk, eff.level, eff.production),
+        None => st.policy.classify(command, eff.level, eff.production),
+    };
+    let deny_reason = match verdict {
         Verdict::Allow => None,
         Verdict::Deny => Some(format!("命令超出只读白名单（当前为 {level} 档）")),
         Verdict::RequireConfirmation => {
@@ -1386,7 +1462,7 @@ async fn exec_gate(
                     let resp = serde_json::to_string_pretty(&json!({
                         "status": "pending_approval",
                         "approvalId": id,
-                        "message": format!("命令需用户在 mySSH 窗口中确认，用户尚未决定。请用完全相同的 session_id 与 command 再次调用 {tool} 继续等待；勿改写命令绕过确认。"),
+                        "message": format!("命令需用户在 mySSH 窗口中确认，用户尚未决定。请用完全相同的参数再次调用 {tool} 继续等待；勿改写命令绕过确认。"),
                     }))
                     .map_err(|e| e.to_string())?;
                     return Ok(Gate::Pending(resp));
@@ -1414,7 +1490,7 @@ async fn job_tool(st: &ServerState, name: &str, args: &Value) -> Result<String, 
             let session_id = req_str(args, "session_id", name)?;
             let command = req_str(args, "command", name)?;
             let pty = args.get("pty").and_then(Value::as_bool).unwrap_or(true);
-            if let Gate::Pending(resp) = exec_gate(st, session_id, command, name).await? {
+            if let Gate::Pending(resp) = exec_gate(st, session_id, command, name, None).await? {
                 return Ok(resp);
             }
             let target = crate::sessions::resolve_session_target(&st.store, session_id).await?;
@@ -2011,10 +2087,10 @@ mod tests {
                 .filter_map(|t| t["name"].as_str())
                 .collect()
         }
-        assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 24);
+        assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 26);
         let all = tools_list(&all_perms());
         let names = names_of(&all);
-        assert_eq!(names.len(), 29);
+        assert_eq!(names.len(), 31);
         // file_* 跟随 sftp_read / sftp_write 权限组
         let ro = McpPerms {
             sftp_write: false,
@@ -2041,6 +2117,7 @@ mod tests {
         let names = names_of(&filtered);
         assert!(!names.contains(&"ssh_exec"));
         assert!(!names.contains(&"job_start") && !names.contains(&"job_read"));
+        assert!(!names.contains(&"recipe_run") && !names.contains(&"recipe_list"));
         assert!(!names.contains(&"sftp_upload"));
         assert!(!names.contains(&"sftp_download"));
         assert!(!names.contains(&"sftp_transfer_list"));
@@ -2092,6 +2169,52 @@ mod tests {
             "白名单命令不应被策略门拦截: {text}"
         );
 
+        // recipe：read 级在只读档穿过门（docker 不在白名单，自由命令会被拒）；
+        // change / danger 级在只读档被拒；参数注入在渲染期即被拒
+        let (text, is_err) = call_text(
+            &url,
+            "recipe_run",
+            json!({ "session_id": "nope", "recipe": "docker_ps" }),
+        )
+        .await;
+        assert!(
+            is_err && !text.contains("安全策略"),
+            "read recipe 不应被拦: {text}"
+        );
+        let (text, _) = call_text(
+            &url,
+            "ssh_exec",
+            json!({ "session_id": "nope", "command": "docker ps -a" }),
+        )
+        .await;
+        assert!(
+            text.contains("安全策略"),
+            "同命令走 ssh_exec 在只读档应被拒: {text}"
+        );
+        for (recipe, params) in [
+            ("service_restart", json!({ "name": "nginx" })),
+            ("kill_process", json!({ "pid": 1 })),
+        ] {
+            let (text, is_err) = call_text(
+                &url,
+                "recipe_run",
+                json!({ "session_id": "nope", "recipe": recipe, "params": params }),
+            )
+            .await;
+            assert!(
+                is_err && text.contains("安全策略"),
+                "{recipe} 应被拒: {text}"
+            );
+        }
+        let (text, is_err) = call_text(
+            &url,
+            "recipe_run",
+            json!({ "session_id": "nope", "recipe": "service_status", "params": { "name": "x;id" } }),
+        )
+        .await;
+        assert!(is_err && text.contains("不合法"), "注入参数应被拒: {text}");
+        let (text, _) = call_text(&url, "recipe_list", json!({})).await;
+        assert!(text.contains("\"risk\":\"danger\""), "{text}");
         mgr.stop().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2329,7 +2452,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 400);
         let tools = rpc(&url, "tools/list", json!({})).await;
-        assert_eq!(tools["tools"].as_array().unwrap().len(), 29);
+        assert_eq!(tools["tools"].as_array().unwrap().len(), 31);
 
         mgr.stop().await;
         let _ = std::fs::remove_dir_all(&dir);
