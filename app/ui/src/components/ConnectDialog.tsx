@@ -39,6 +39,7 @@ const MCP_PERM_GROUPS = [
   ['sftp_read', 'dialogs.mcpAllowSftpRead'],
   ['sftp_write', 'dialogs.mcpAllowSftpWrite'],
   ['sftp_transfer', 'dialogs.mcpAllowSftpTransfer'],
+  ['terminal', 'dialogs.mcpAllowTerminal'],
 ] as const;
 // TestConnectRequest 唯一源头 = Rust（term/bindings，经 types.ts re-export）
 

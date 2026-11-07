@@ -159,6 +159,7 @@ export const zhDialogs = {
   'dialogs.clearDownloadDir': '清除',
   'dialogs.browseFailed': '打开目录选择框失败：{error}',
   'dialogs.mcpAllowSftpTransfer': 'SFTP 上传/下载（读写本地文件）',
+  'dialogs.mcpAllowTerminal': '交互终端 terminal_*（不经命令策略，默认关闭）',
   'dialogs.mcpHint':
     'AI 客户端（如 Claude Code）接入：POST http://127.0.0.1:<端口>/mcp，请求头 Authorization: Bearer <令牌>。勾选启用后自动生成令牌；仅监听本机回环。',
   'dialogs.terminal': '终端',

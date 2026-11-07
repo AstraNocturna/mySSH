@@ -45,10 +45,11 @@
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | 远端写入与元操作（落审计） |
 | `sftp_upload` / `sftp_download` | 文件传输：入队后台传输队列执行（与 UI 传输面板共享，**无大小上限**；`wait_seconds` 可同步等待终态） |
 | `sftp_transfer_list` | 查询传输进度 / 状态 / 错误 |
+| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略） |
 
 **权限模型**（三层）：
 
-1. 全局默认：设置 → MCP → 工具权限，5 个分组开关（list_sessions / ssh_exec / SFTP 读取 / SFTP 写入 / SFTP 传输）
+1. 全局默认：设置 → MCP → 工具权限，6 个分组开关（list_sessions / ssh_exec / SFTP 读取 / SFTP 写入 / SFTP 传输 / 交互终端；交互终端默认关闭）
 2. 会话覆盖：会话编辑器 → MCP 权限页签，每组三态（跟随全局 / 允许 / 禁止）——生产机禁 `ssh_exec`、测试机全开，互不干扰
 3. 命令策略（恒开）：`ssh_exec` 命令执行前分类——只读白名单放行，黑名单 / 间接执行器 / 无法解析的结构一律拒绝（fail-closed，MCP 暂无人工确认通道）；每会话限速（`mcp.rate_limit_per_minute`，默认 60 次/分钟）；所有尝试写入审计日志
 

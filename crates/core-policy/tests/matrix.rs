@@ -97,6 +97,80 @@ fn parse_failure_fails_closed() {
     );
 }
 
+/// 白名单命令靠参数写系统或执行任意命令：readonly 档必须拦下
+#[test]
+fn whitelisted_heads_with_writing_args_are_not_allowed() {
+    let ro = |cmd: &str| eng().classify(cmd, AccessLevel::Readonly, false);
+    for cmd in [
+        "env rm -rf /",
+        "env -S 'rm -rf /'",
+        "env A=1 bash -c id",
+        "find . -exec rm {} \\;",
+        "find / -execdir sh -c id \\;",
+        "sort --compress-program=sh a",
+        "ip netns exec foo id",
+    ] {
+        assert_eq!(ro(cmd), Verdict::RequireConfirmation, "{cmd}");
+    }
+    for cmd in [
+        "find /tmp -name x -delete",
+        "find . -fprint /etc/passwd",
+        "systemctl stop sshd",
+        "systemctl --now disable sshd",
+        "journalctl --vacuum-size=1M",
+        "dmesg -C",
+        "date -s '2020-01-01'",
+        "date 010100002020",
+        "hostname evil",
+        "sort -o /etc/hosts a",
+        "sort -nro /etc/hosts a",
+        "uniq a /etc/hosts",
+        "ss -K dst 1.2.3.4",
+        "mount /dev/sdb1 /mnt",
+        "ip link set eth0 down",
+        "ip l s eth0 down",
+        "ip addr add 10.0.0.1/24 dev eth0",
+        "file -C -m x",
+    ] {
+        assert_eq!(ro(cmd), Verdict::Deny, "{cmd}");
+    }
+}
+
+/// 参数收紧不能误伤常见只读用法
+#[test]
+fn whitelisted_heads_with_readonly_args_still_allowed() {
+    for cmd in [
+        "env",
+        "env -0",
+        "find /var/log -name '*.log' -mtime -1",
+        "systemctl status nginx",
+        "systemctl --no-pager list-units --failed",
+        "systemctl is-active sshd",
+        "systemctl",
+        "journalctl -u nginx -n 100 --no-pager",
+        "dmesg -T",
+        "date",
+        "date +%s",
+        "date -d @1700000000",
+        "hostname",
+        "hostname -I",
+        "sort -n a",
+        "uniq -c a",
+        "ss -tlnp",
+        "mount",
+        "ip a",
+        "ip -br addr",
+        "ip route get 1.1.1.1",
+        "ip addr show dev eth0",
+    ] {
+        assert_eq!(
+            eng().classify(cmd, AccessLevel::Readonly, false),
+            Verdict::Allow,
+            "{cmd}"
+        );
+    }
+}
+
 #[test]
 fn production_forces_confirmation_on_unproven() {
     // production + 全白名单只读 → 仍 Allow
