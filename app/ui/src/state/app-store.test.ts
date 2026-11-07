@@ -579,4 +579,18 @@ describe('MCP agent 终端标签', () => {
     expect(state().aiTabs).toEqual({});
     expect(state().notices.some((n) => n.level === 'error')).toBe(true);
   });
+
+  it('录像：开始成功打标记，停止摘标记；开始失败不打标记', async () => {
+    useAppStore.setState({ recTabs: {} });
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'term_record_stop' ? Promise.resolve({ title: 'web' }) : Promise.resolve('rid'),
+    );
+    await state().startRecording('bt1', 'web');
+    expect(state().recTabs).toEqual({ bt1: true });
+    await state().stopRecording('bt1');
+    expect(state().recTabs).toEqual({});
+    vi.mocked(invoke).mockImplementation(() => Promise.reject(new Error('gone')));
+    await state().startRecording('bt2', 'x');
+    expect(state().recTabs).toEqual({});
+  });
 });

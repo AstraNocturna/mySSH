@@ -15,6 +15,7 @@ import { TabBar } from './components/TabBar';
 import { AppToolbar } from './components/AppToolbar';
 import { CommandPalette } from './components/CommandPalette';
 import { SnippetsDialog } from './components/SnippetsDialog';
+import { RecordingsDialog } from './components/RecordingsDialog';
 import { ConnectDialog } from './components/ConnectDialog';
 import { HostKeyDialog } from './components/HostKeyDialog';
 import { ApprovalDialog } from './components/ApprovalDialog';
@@ -44,6 +45,7 @@ export function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const snippetsOpen = useAppStore((s) => s.snippetsOpen);
+  const recordingsOpen = useAppStore((s) => s.recordingsOpen);
   const pendingDeleteSession = useAppStore((s) => s.pendingDeleteSession);
   const pendingCloseTabs = useAppStore((s) => s.pendingCloseTabs);
   const pendingCloseTabData = tabs.filter((t) => pendingCloseTabs?.includes(t.id));
@@ -271,6 +273,7 @@ export function App() {
       <KiDialog />
       {paletteOpen && <CommandPalette />}
       {snippetsOpen && <SnippetsDialog />}
+      {recordingsOpen && <RecordingsDialog />}
       {settingsOpen && <SettingsDialog />}
       {/* 批次一 7.1：删除服务器确认（级联清凭据，不可撤销；默认焦点在取消） */}
       {pendingDeleteSession && (

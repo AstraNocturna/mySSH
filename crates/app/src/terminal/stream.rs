@@ -117,6 +117,8 @@ pub(super) async fn read_loop<R: ByteSource, K: ByteSink + Sync>(
     writer: Option<&Arc<AnyWriter>>,
     // AI 共享旁路：解码后的输出 tee 一份（不经信用闸，agent 读取不受 UI 背压影响）
     tap: Option<&super::session::TapSlot>,
+    // 会话录像：同一 tee 点（录像写盘在专用线程，这里只拷贝一次）
+    rec: Option<&crate::recording::RecSlot>,
 ) {
     let mut agg: Vec<u8> = Vec::with_capacity(AGG_CAP);
     // 降权（PR-17 二期）：后台 tab 聚合窗 8ms → 500ms
@@ -174,6 +176,9 @@ pub(super) async fn read_loop<R: ByteSource, K: ByteSink + Sync>(
                         }
                         if let Some(slot) = tap {
                             super::session::tee_tap(slot, &agg[before..]);
+                        }
+                        if let Some(slot) = rec {
+                            crate::recording::tee(slot, &agg[before..]);
                         }
                         if agg.len() >= AGG_CAP {
                             flush(sink, &mut agg, credit, focused, ring).await;
@@ -376,6 +381,7 @@ mod tests {
             tokio::spawn(async move {
                 read_loop(
                     &mut src, &sink, &credit, &focused, &ring, None, None, &mut None, None, None,
+                    None,
                 )
                 .await;
             })
@@ -424,6 +430,7 @@ mod tests {
                 &mut None,
                 None,
                 Some(&s2),
+                None,
             )
             .await;
         });
@@ -433,6 +440,48 @@ mod tests {
         tap.close();
         tee_tap(&slot, b"late");
         assert_eq!(tap.out.lock().total, 11, "关闭后不得再写入");
+        task.abort();
+    }
+
+    /// 会话录像：输出逐块 tee 进录像（与 AI 旁路同一 tee 点），停止后不再写入
+    #[tokio::test(start_paused = true)]
+    async fn recording_tees_output() {
+        let mut src = FakeSource::new(vec![
+            Some(Bytes::from_static(b"\x1b[1mhi\x1b[0m ")),
+            Some(Bytes::from_static(b"there")),
+        ]);
+        let sink = Arc::new(FakeSink::default());
+        let credit = Arc::new(CreditState::new(7));
+        let focused = Arc::new(AtomicBool::new(true));
+        let ring = Arc::new(RingBuf::new(4096));
+        let root = std::env::temp_dir().join(format!("myssh-stream-rec-{}", std::process::id()));
+        let store = crate::recording::RecordingStore::new(root, None);
+        let rec = store
+            .start("t", crate::recording::RecSource::User, None, 80, 24)
+            .unwrap();
+        let slot = crate::recording::RecSlot::default();
+        *slot.lock() = Some(rec.clone());
+        let s2 = slot.clone();
+        let task = tokio::spawn(async move {
+            read_loop(
+                &mut src,
+                &sink,
+                &credit,
+                &focused,
+                &ring,
+                None,
+                None,
+                &mut None,
+                None,
+                None,
+                Some(&s2),
+            )
+            .await;
+        });
+        settle().await;
+        crate::recording::stop_slot(&slot);
+        let meta = rec.finish().unwrap();
+        assert_eq!(store.export_text(&meta.id).unwrap(), "hi there");
         task.abort();
     }
 

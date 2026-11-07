@@ -22,6 +22,7 @@ export function TabBar() {
   const bellTabs = useAppStore((s) => s.bellTabs);
   const sessions = useAppStore((s) => s.sessions);
   const aiTabs = useAppStore((s) => s.aiTabs);
+  const recTabs = useAppStore((s) => s.recTabs);
 
   /** 标签右键菜单（批次四 10.3） */
   const [menu, setMenu] = useState<{ x: number; y: number; tab: Tab } | null>(null);
@@ -116,6 +117,9 @@ export function TabBar() {
         const aiKind = Object.values(t.panes)
           .map((p) => (p.session.tabId ? aiTabs[p.session.tabId] : undefined))
           .find((k) => k !== undefined);
+        const recording = Object.values(t.panes).some((p) =>
+          p.session.tabId ? recTabs[p.session.tabId] : false,
+        );
         // 标签颜色点：session 标签从 sessions 列表取 record.color；本地终端等无关联会话不渲染
         const tabSessionId = t.target.kind === 'session' ? t.target.sessionId : null;
         const sessionColor = tabSessionId
@@ -173,6 +177,12 @@ export function TabBar() {
               >
                 AI
               </span>
+            )}
+            {recording && (
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-red-500"
+                title={tr('chrome.recBadgeTitle')}
+              />
             )}
             {/* 12.6：bell 待读标记（非活跃标签收到 BEL；激活即清，静态点无动画） */}
             {bellTabs.includes(t.id) && (

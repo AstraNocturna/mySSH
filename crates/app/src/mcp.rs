@@ -319,6 +319,8 @@ pub struct McpDeps {
     pub backups: Arc<crate::mcp_files::BackupStore>,
     /// 后台命令注册表
     pub jobs: Arc<crate::mcp_jobs::McpJobs>,
+    /// 会话录像（AI 终端自动录制）
+    pub recs: Arc<crate::recording::RecordingStore>,
 }
 
 /// MCP 服务生命周期管理：持有 tokio task + shutdown watch
@@ -365,6 +367,7 @@ impl McpManager {
             term_mgr,
             backups,
             jobs,
+            recs,
         } = deps;
         let state = Arc::new(ServerState {
             store,
@@ -375,6 +378,7 @@ impl McpManager {
             term_mgr,
             backups,
             jobs: jobs.clone(),
+            recs,
             token: token.clone(),
             perms,
             // 安全模型执行面（M0 只读档）：判定管线 + 每会话速率闸，随服务同生命周期
@@ -520,6 +524,7 @@ pub async fn mcp_restart(
     term_mgr: tauri::State<'_, Arc<crate::terminal::TerminalManager>>,
     backups: tauri::State<'_, Arc<crate::mcp_files::BackupStore>>,
     jobs: tauri::State<'_, Arc<crate::mcp_jobs::McpJobs>>,
+    recs: tauri::State<'_, Arc<crate::recording::RecordingStore>>,
 ) -> Result<Value, String> {
     let deps = McpDeps {
         store: sessions.store.clone(),
@@ -530,6 +535,7 @@ pub async fn mcp_restart(
         term_mgr: term_mgr.inner().clone(),
         backups: backups.inner().clone(),
         jobs: jobs.inner().clone(),
+        recs: recs.inner().clone(),
     };
     restart_from_settings(&state, deps).await
 }
@@ -550,6 +556,7 @@ struct ServerState {
     backups: Arc<crate::mcp_files::BackupStore>,
     /// 后台命令（job_*；命令门同 ssh_exec）
     jobs: Arc<crate::mcp_jobs::McpJobs>,
+    recs: Arc<crate::recording::RecordingStore>,
     token: String,
     /// 工具分组权限（启动时快照；改设置后 mcp_restart 生效）
     perms: McpPerms,
@@ -1248,6 +1255,7 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
                 terms: &st.terms,
                 ui: &st.ui,
                 mgr: &st.term_mgr,
+                recs: &st.recs,
             };
             match crate::mcp_terminal::terminal_tool(&ctx, n, args).await {
                 Ok(text) => ok_content(text),
@@ -2279,6 +2287,10 @@ mod tests {
                 std::env::temp_dir().join(format!("myssh-mcp-bk-{}", std::process::id())),
             ),
             jobs: crate::mcp_jobs::McpJobs::new(),
+            recs: crate::recording::RecordingStore::new(
+                std::env::temp_dir().join(format!("myssh-mcp-rec-{}", std::process::id())),
+                None,
+            ),
             token: String::new(),
             perms: all_perms(),
             policy: PolicyEngine::new(),
@@ -2384,6 +2396,10 @@ mod tests {
                 std::env::temp_dir().join(format!("myssh-mcp-bk-{}", std::process::id())),
             ),
             jobs: crate::mcp_jobs::McpJobs::new(),
+            recs: crate::recording::RecordingStore::new(
+                std::env::temp_dir().join(format!("myssh-mcp-rec-{}", std::process::id())),
+                None,
+            ),
         };
         mgr.start(
             deps,
