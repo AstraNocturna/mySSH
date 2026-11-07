@@ -196,7 +196,7 @@ export const enDialogs: Record<keyof typeof zhDialogs, string> = {
   'dialogs.browseFailed': 'Failed to open folder picker: {error}',
   'dialogs.mcpToolPerms': 'Tool permissions',
   'dialogs.mcpAllowListSessions': 'list_sessions (list saved sessions)',
-  'dialogs.mcpAllowSshExec': 'ssh_exec (run remote commands)',
+  'dialogs.mcpAllowSshExec': 'ssh_exec / job_* (run remote commands, background jobs)',
   'dialogs.mcpAllowSftpRead': 'SFTP read (list/read remote)',
   'dialogs.mcpAllowSftpWrite': 'SFTP write (write/delete remote)',
   'dialogs.mcpAllowSftpTransfer': 'SFTP upload/download (touches local files)',
