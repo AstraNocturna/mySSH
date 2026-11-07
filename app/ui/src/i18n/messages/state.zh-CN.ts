@@ -110,6 +110,7 @@ export const zhState = {
   'state.menu.copy': '复制',
   'state.menu.selectAll': '全选',
   'state.menu.search': '搜索',
+  'state.menu.snippets': '命令片段…',
   'state.menu.clearScreen': '清空屏幕',
   'state.menu.reconnect': '重新连接',
   'state.menu.openSftp': '打开 SFTP',
