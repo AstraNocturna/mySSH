@@ -7,6 +7,8 @@ import { reconnectRegistry } from '../term/registry';
 import { BUILTIN_THEMES } from '../term/themes';
 import { useAppStore } from '../state/app-store';
 import { GROUP_KEYS, readStringList, sshCommand } from '../state/groups';
+import { SNIPPETS_KEY, readSnippets, type Snippet } from '../term/snippets';
+import { insertIntoActivePane } from './SnippetsDialog';
 import { tNow, useT } from '../i18n';
 
 /**
@@ -203,6 +205,11 @@ export function CommandPalette() {
       },
       { id: 'a-sidebar', label: t('chrome.actSidebar'), run: () => toggleSidebar() },
       {
+        id: 'a-snippets',
+        label: t('chrome.actSnippets'),
+        run: () => useAppStore.getState().toggleSnippets(),
+      },
+      {
         id: 'a-exp-plain',
         label: t('chrome.actExportPlain'),
         run: () => exportConfig(false),
@@ -226,6 +233,7 @@ export function CommandPalette() {
   type Item =
     | { kind: 'session'; id: string; label: string; hint: string; score: number }
     | { kind: 'group'; path: string; score: number }
+    | { kind: 'snippet'; snippet: Snippet; score: number }
     | { kind: 'action'; action: Action; score: number };
 
   const items = useMemo<Item[]>(() => {
@@ -247,15 +255,20 @@ export function CommandPalette() {
       const score = fuzzyMatchAny(query, [g]);
       if (score !== null) out.push({ kind: 'group', path: g, score });
     }
+    for (const sn of readSnippets(settings[SNIPPETS_KEY])) {
+      const score = fuzzyMatchAny(query, [sn.name, sn.trigger ?? '', sn.command]);
+      if (score !== null) out.push({ kind: 'snippet', snippet: sn, score });
+    }
     for (const a of actions) {
       const score = fuzzyMatchAny(query, [a.label]);
       if (score !== null) out.push({ kind: 'action', action: a, score });
     }
-    // 分区内按分数排序；区间固定 服务器 → 分组 → 操作
-    const rank = (i: Item) => (i.kind === 'session' ? 0 : i.kind === 'group' ? 1 : 2);
+    // 分区内按分数排序；区间固定 服务器 → 分组 → 片段 → 操作
+    const rank = (i: Item) =>
+      i.kind === 'session' ? 0 : i.kind === 'group' ? 1 : i.kind === 'snippet' ? 2 : 3;
     out.sort((x, y) => rank(x) - rank(y) || y.score - x.score);
     return out.slice(0, 30);
-  }, [query, sessions, actions]);
+  }, [query, sessions, actions, settings]);
 
   const execute = (item: Item) => {
     if (item.kind === 'session') {
@@ -273,6 +286,11 @@ export function CommandPalette() {
         collapsed.filter((g) => g !== item.path && !g.startsWith(item.path + '/')),
       );
       toggle();
+      return;
+    }
+    if (item.kind === 'snippet') {
+      toggle();
+      insertIntoActivePane(item.snippet);
       return;
     }
     const a = item.action;
@@ -316,7 +334,9 @@ export function CommandPalette() {
       ? t('chrome.sectionServers')
       : item.kind === 'group'
         ? t('chrome.sectionGroups')
-        : t('chrome.sectionActions');
+        : item.kind === 'snippet'
+          ? t('chrome.sectionSnippets')
+          : t('chrome.sectionActions');
 
   return (
     <div
@@ -373,7 +393,9 @@ export function CommandPalette() {
                     ? item.action.id
                     : item.kind === 'group'
                       ? `g:${item.path}`
-                      : item.id
+                      : item.kind === 'snippet'
+                        ? `s:${item.snippet.id}`
+                        : item.id
                 }
               >
                 {(i === 0 || sectionOf(items[i - 1] ?? item) !== sectionOf(item)) && (
@@ -396,14 +418,20 @@ export function CommandPalette() {
                       ? item.label
                       : item.kind === 'group'
                         ? `📁 ${item.path}`
-                        : item.action.label}
+                        : item.kind === 'snippet'
+                          ? item.snippet.name
+                          : item.action.label}
                   </span>
                   <span className="shrink-0 text-xs text-neutral-500">
                     {item.kind === 'session'
                       ? item.hint
                       : item.kind === 'group'
                         ? t('chrome.sectionGroups')
-                        : shortcutOf(item.action, settings)}
+                        : item.kind === 'snippet'
+                          ? item.snippet.trigger
+                            ? `${item.snippet.trigger} ⇥`
+                            : t('chrome.sectionSnippets')
+                          : shortcutOf(item.action, settings)}
                   </span>
                 </button>
               </li>

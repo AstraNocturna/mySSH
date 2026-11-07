@@ -25,6 +25,13 @@ import {
 } from '../state/apply-settings';
 import { keymapFromSettings, matchAction, matchCombo } from '../term/keymap';
 import { pasteNeedsConfirm } from '../term/paste';
+import {
+  LineTracker,
+  SNIPPETS_KEY,
+  expandTrigger,
+  matchTrigger,
+  readSnippets,
+} from '../term/snippets';
 import type { SessionStateFrame } from '../term/types';
 import { SearchBar, type SearchOptions, type SearchResults } from '../components/SearchBar';
 import { ContextMenu, type MenuItem } from '../components/ContextMenu';
@@ -46,6 +53,8 @@ interface PaneRuntime {
   sawReconnect: boolean;
   /** 终态原因缓存：重挂后新实例以此为初值，原位操作层不丢 */
   deadMsg: string | null;
+  /** 当前行键入跟踪（片段 Tab 展开判定） */
+  line: LineTracker;
   /** session_state 旁路钩子：经 ui 出口动态触达当前挂载实例（旧闭包重挂后仍指最新 setState） */
   stateHook: (ev: SessionStateFrame) => void;
   /** 最近一次挂载写入的组件态出口 */
@@ -202,6 +211,7 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
         search,
         sawReconnect: false,
         deadMsg: null,
+        line: new LineTracker(),
         ui: { setSearchOpen, setSearchResults, setDead, setMenu },
         // 断线/重连/终态标记直接写入 xterm（同一实例续写，回滚天然保留）；
         // 组件态经 rtNew.ui 出口——重挂后此闭包仍指向最新挂载实例
@@ -262,11 +272,24 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
         }
       }
 
+      term.onData((d) => rtNew.line.feed(d));
+
       // 快捷键（keymap 注册表）：搜索/复制/粘贴在此拦截，其余按键全部放行给终端。
       // Ctrl+C 不在注册表内（保留给 SIGINT）；无选中时复制动作禁用（吞键不下发）。
       term.attachCustomKeyEventHandler((e) => {
         if (e.type !== 'keydown') return true;
-        const bindings = keymapFromSettings(useAppStore.getState().settings);
+        const settingsNow = useAppStore.getState().settings;
+        // 片段展开：行尾是触发词时 Tab 归片段，否则照常交给 shell 补全
+        if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+          const hit = matchTrigger(rtNew.line.text, readSnippets(settingsNow[SNIPPETS_KEY]));
+          if (hit) {
+            e.preventDefault();
+            expandTrigger(term, hit);
+            rtNew.line.reset();
+            return false;
+          }
+        }
+        const bindings = keymapFromSettings(settingsNow);
         if (bindings['search'] && matchCombo(e, bindings['search'])) {
           rtNew.ui.setSearchOpen(true);
           return false;
@@ -503,6 +526,7 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
       },
       { label: t('state.menu.selectAll'), icon: '□', onSelect: () => term?.selectAll() },
       { label: t('state.menu.search'), icon: '⌕', onSelect: () => setSearchOpen(true) },
+      { label: t('state.menu.snippets'), icon: '❯', onSelect: () => s.toggleSnippets() },
       'separator',
       {
         label: t('state.menu.clearScreen'),

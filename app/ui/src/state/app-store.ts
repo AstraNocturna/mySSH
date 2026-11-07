@@ -174,6 +174,9 @@ interface AppStore {
   /** 命令面板（Ctrl+Shift+P） */
   paletteOpen: boolean;
   togglePalette(): void;
+  /** 命令片段管理框 */
+  snippetsOpen: boolean;
+  toggleSnippets(): void;
   /** 分级通知堆叠（toast）；12.1：可选可序列化动作（actionId 经 notice-actions 注册表分发） */
   notices: Notice[];
   notify(
@@ -685,6 +688,8 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     paletteOpen: false,
     togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
+    snippetsOpen: false,
+    toggleSnippets: () => set((s) => ({ snippetsOpen: !s.snippetsOpen })),
     broadcastEnabled: false,
     toggleBroadcast: () => set((s) => ({ broadcastEnabled: !s.broadcastEnabled })),
     quickConnectOpen: false,

@@ -114,6 +114,7 @@ export const enState: Record<keyof typeof zhState, string> = {
   'state.menu.copy': 'Copy',
   'state.menu.selectAll': 'Select All',
   'state.menu.search': 'Search',
+  'state.menu.snippets': 'Snippets…',
   'state.menu.clearScreen': 'Clear Screen',
   'state.menu.reconnect': 'Reconnect',
   'state.menu.openSftp': 'Open SFTP',
