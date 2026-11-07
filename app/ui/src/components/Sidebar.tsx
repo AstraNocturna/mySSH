@@ -6,6 +6,7 @@ import type { SessionRecord } from '../term/types';
 import { ContextMenu, type MenuItem } from './ContextMenu';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Dialog } from './Dialog';
+import { GroupPolicyDialog } from './GroupPolicyDialog';
 import {
   buildGroupTree,
   canMoveGroup,
@@ -15,7 +16,9 @@ import {
   isValidGroupPath,
   rangeSessionIds,
   readFailedList,
+  readGroupPolicies,
   readStringList,
+  remapGroupPolicies,
   rewritePathOnDeleteKeep,
   rewritePathOnRename,
   GROUP_KEYS,
@@ -70,6 +73,8 @@ export function Sidebar() {
   const [batchDel, setBatchDel] = useState<SessionRecord[] | null>(null);
   /** 虚拟分组视图 */
   const [virt, setVirt] = useState<'favorites' | null>(null);
+  /** 分组 MCP 策略编辑 */
+  const [policyPath, setPolicyPath] = useState<string | null>(null);
 
   useEffect(() => {
     void load();
@@ -196,6 +201,14 @@ export function Sidebar() {
 
   const persistExtras = (list: string[]) => s().setGroupList('groups.extra', list);
   const persistCollapsed = (list: string[]) => s().setGroupList('groups.collapsed', list);
+  /** 分组路径变化后同步迁移 MCP 分组策略键（无策略时不写库） */
+  const remapPolicies = (mapPath: (p: string) => string | null) => {
+    const cur = readGroupPolicies(s().settings[GROUP_KEYS.mcpGroupPolicies]);
+    if (Object.keys(cur).length === 0) return;
+    s().setSetting(GROUP_KEYS.mcpGroupPolicies, remapGroupPolicies(cur, mapPath));
+  };
+  const renamePolicies = (old: string, next: string) =>
+    remapPolicies((p) => rewritePathOnRename([p], old, next)[0] ?? null);
 
   const createGroup = (parent: string, name: string) => {
     const seg = name.trim().replace(/\//g, '');
@@ -222,6 +235,7 @@ export function Sidebar() {
     if (next === path) return;
     try {
       await invoke('group_rename', { oldPath: path, newPath: next });
+      renamePolicies(path, next);
       persistExtras(rewritePathOnRename(extras, path, next));
       persistCollapsed(rewritePathOnRename([...collapsed], path, next));
       await s().loadSessions();
@@ -255,6 +269,7 @@ export function Sidebar() {
     if (next === source) return;
     try {
       await invoke('group_rename', { oldPath: source, newPath: next });
+      renamePolicies(source, next);
       persistExtras(rewritePathOnRename(extras, source, next));
       persistCollapsed(rewritePathOnRename([...collapsed], source, next));
       await s().loadSessions();
@@ -270,6 +285,8 @@ export function Sidebar() {
         path,
         withSessions: false,
       });
+      // 被删分组自身的策略丢弃（其会话上移到父级，改由父级策略约束）；子分组策略随子分组上移
+      remapPolicies((p) => (p === path ? null : (rewritePathOnDeleteKeep([p], path)[0] ?? null)));
       persistExtras(rewritePathOnDeleteKeep(extras, path));
       persistCollapsed(rewritePathOnDeleteKeep([...collapsed], path));
       await s().loadSessions();
@@ -287,6 +304,7 @@ export function Sidebar() {
       });
       // 级联删除：该分组及子分组的 extras/collapsed 条目一并移除（不上移）
       const gone = (p: string) => p === path || p.startsWith(path + '/');
+      remapPolicies((p) => (gone(p) ? null : p));
       persistExtras(extras.filter((p) => !gone(p)));
       persistCollapsed([...collapsed].filter((p) => !gone(p)));
       setSel({ anchor: null, ids: [] });
@@ -453,6 +471,11 @@ export function Sidebar() {
             onSelect: () => void moveGroupTo(path, p),
           })),
       ],
+    },
+    {
+      label: t('chrome.menuMcpPolicy'),
+      icon: '⛨',
+      onSelect: () => setPolicyPath(path),
     },
     'separator',
     {
@@ -783,6 +806,10 @@ export function Sidebar() {
       {/* 右键菜单 */}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
+      )}
+
+      {policyPath !== null && (
+        <GroupPolicyDialog path={policyPath} onClose={() => setPolicyPath(null)} />
       )}
 
       {/* 非空分组删除三选（统一 Dialog 基座：Esc=取消，默认焦点在安全选项） */}

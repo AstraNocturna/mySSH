@@ -12,7 +12,9 @@ mod lifecycle;
 mod local_pty;
 mod logging;
 mod mcp;
+mod mcp_policy;
 mod mcp_terminal;
+mod mcp_ui;
 mod monitor;
 mod perf;
 mod sessions;
@@ -66,6 +68,7 @@ pub fn run() {
     let monitor_state = monitor::MonitorState::new();
     let mcp_manager = mcp::McpManager::new();
     let mcp_terms = mcp_terminal::McpTerminalState::new();
+    let mcp_ui_hub = mcp_ui::McpUiHub::new();
     // 会话变更失效扇出：命令只发事件，消费方在此登记（隧道/ctx 池）
     lifecycle::wire(
         &session_state.events,
@@ -88,6 +91,7 @@ pub fn run() {
         .manage(monitor_state)
         .manage(mcp_manager.clone())
         .manage(mcp_terms.clone())
+        .manage(mcp_ui_hub.clone())
         .setup(move |app| {
             // 开机自启隧道：store 已就绪，后台拉起（失败仅日志，监督器自持重连）
             let mgr = tunnel_mgr_state.mgr.clone();
@@ -105,12 +109,15 @@ pub fn run() {
                 }
             });
             // MCP 服务端：按 mcp.enabled/port/token 设置启动（绑定失败仅日志）
-            let store = session_state.store.clone();
-            let sftp = sftp_state.clone();
-            let exec = exec_state.clone();
-            let terms = mcp_terms.clone();
+            let deps = crate::mcp::McpDeps {
+                store: session_state.store.clone(),
+                sftp: sftp_state.clone(),
+                exec: exec_state.clone(),
+                terms: mcp_terms.clone(),
+                ui: mcp_ui_hub.clone(),
+            };
             tauri::async_runtime::spawn(async move {
-                crate::mcp::boot_from_settings(mcp_manager, store, sftp, exec, terms).await;
+                crate::mcp::boot_from_settings(mcp_manager, deps).await;
             });
             let _ = app;
             Ok(())
@@ -200,6 +207,8 @@ pub fn run() {
             settings::settings_delete,
             mcp::mcp_status,
             mcp::mcp_restart,
+            mcp_ui::mcp_ui_subscribe,
+            mcp_ui::mcp_approve,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

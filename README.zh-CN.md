@@ -40,18 +40,19 @@
 | 工具 | 说明 |
 | --- | --- |
 | `list_sessions` | 列出会话档案（不含凭据） |
-| `ssh_exec` | 在会话上执行 shell 命令，返回 stdout/stderr/exit code。命令先过内置策略分类器（M0 只读档：白名单放行、黑名单/无法静态判定拒绝），按会话限速，全部尝试落审计 |
+| `ssh_exec` | 在会话上执行 shell 命令，返回 stdout/stderr/exit code。命令按会话的访问档位过内置策略分类器；高风险命令弹出应用内确认框（调用可能返回 `pending_approval`，用相同参数重试即继续等待）。按会话限速，全部尝试落审计 |
 | `sftp_home` / `sftp_list` / `sftp_stat` / `sftp_read` | 远端浏览与读文件 |
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | 远端写入与元操作（落审计） |
 | `sftp_upload` / `sftp_download` | 文件传输：入队后台传输队列执行（与 UI 传输面板共享，**无大小上限**；`wait_seconds` 可同步等待终态） |
 | `sftp_transfer_list` | 查询传输进度 / 状态 / 错误 |
 | `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略） |
 
-**权限模型**（三层）：
+**权限模型**（按 会话 → 最近的分组 → 全局 解析）：
 
-1. 全局默认：设置 → MCP → 工具权限，6 个分组开关（list_sessions / ssh_exec / SFTP 读取 / SFTP 写入 / SFTP 传输 / 交互终端；交互终端默认关闭）
-2. 会话覆盖：会话编辑器 → MCP 权限页签，每组三态（跟随全局 / 允许 / 禁止）——生产机禁 `ssh_exec`、测试机全开，互不干扰
-3. 命令策略（恒开）：`ssh_exec` 命令执行前分类——只读白名单放行，黑名单 / 间接执行器 / 无法解析的结构一律拒绝（fail-closed，MCP 暂无人工确认通道）；每会话限速（`mcp.rate_limit_per_minute`，默认 60 次/分钟）；所有尝试写入审计日志
+1. 全局默认：设置 → MCP，6 个工具分组开关（list_sessions / ssh_exec / SFTP 读取 / SFTP 写入 / SFTP 传输 / 交互终端；交互终端默认关闭）与访问档位（默认只读 / 标准 / 完全）
+2. 分组策略：分组右键 → MCP 策略，可设工具分组、访问档位与生产环境标记，子分组及其会话继承
+3. 会话覆盖：会话编辑器 → MCP 权限页签，每项都可继承或覆盖——生产机禁 `ssh_exec`、测试机全开，互不干扰
+4. 命令策略（恒开）：`ssh_exec` 命令执行前分类。只读档仅放行白名单；标准档无法证明只读的命令需确认；完全档仅黑名单需确认。黑名单 / 间接执行器 / 无法解析的结构在任何档位都需确认，生产环境会话的非只读命令也总是需要确认。确认走应用内弹窗（默认焦点在「拒绝」，5 分钟未决自动拒绝），没有可用的应用窗口时 fail-closed 拒绝；每会话限速（`mcp.rate_limit_per_minute`，默认 60 次/分钟）；所有尝试与决定写入审计日志
 
 配置示例（`.omp/mcp.json`，Claude Code 同构）：
 

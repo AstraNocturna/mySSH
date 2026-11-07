@@ -2,6 +2,7 @@
 //! Sidebar 视图与 vitest 共用；不含任何 store/IPC 依赖。
 
 import type { SessionRecord } from '../term/types';
+import type { GroupPolicy } from '../term/bindings/GroupPolicy';
 /** settings KV 键（批次二服务器库） */
 export const GROUP_KEYS = {
   clickToConnect: 'sidebar.clickToConnect',
@@ -10,7 +11,46 @@ export const GROUP_KEYS = {
   failed: 'sessions.failed',
   collapsed: 'groups.collapsed',
   extraGroups: 'groups.extra',
+  /** MCP 分组策略（分组路径 → GroupPolicy；后端 mcp_policy.rs 每次调用现读） */
+  mcpGroupPolicies: 'mcp.group_policies',
 } as const;
+
+export type GroupPolicies = Record<string, GroupPolicy>;
+
+/** KV 读分组策略（脏数据容忍：只收对象值） */
+export function readGroupPolicies(v: unknown): GroupPolicies {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  return Object.fromEntries(
+    Object.entries(v as Record<string, unknown>).filter(
+      (e): e is [string, GroupPolicy] => !!e[1] && typeof e[1] === 'object',
+    ),
+  );
+}
+
+/** 策略是否为空（全部继承）：空策略不落库 */
+export function isEmptyPolicy(p: GroupPolicy): boolean {
+  return (
+    Object.keys(p.perms ?? {}).length === 0 &&
+    (p.level ?? null) === null &&
+    (p.production ?? null) === null
+  );
+}
+
+/**
+ * 分组路径变化时迁移策略键：mapPath 返回新路径，null = 丢弃。
+ * 与 extras/collapsed 的改写函数配合，保证改名/移动/删除后策略不悬空、不错挂。
+ */
+export function remapGroupPolicies(
+  policies: GroupPolicies,
+  mapPath: (path: string) => string | null,
+): GroupPolicies {
+  const out: GroupPolicies = {};
+  for (const [path, p] of Object.entries(policies)) {
+    const next = mapPath(path);
+    if (next) out[next] = p;
+  }
+  return out;
+}
 
 export interface FailedEntry {
   id: string;

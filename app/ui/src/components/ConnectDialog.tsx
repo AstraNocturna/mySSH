@@ -4,6 +4,7 @@ import { useAppStore } from '../state/app-store';
 import { TunnelEditor } from './TunnelEditor';
 import { Dialog } from './Dialog';
 import { ConfirmDialog } from './ConfirmDialog';
+import { MCP_LEVELS, MCP_PERM_GROUPS, setPermMode } from './mcp-options';
 import {
   START_MODE_LABEL,
   TUNNEL_KIND_KEY,
@@ -32,15 +33,6 @@ const TAB_LABEL: Record<EditorTab, MsgKey> = {
   mcp: 'dialogs.tabMcp',
 };
 
-/** MCP 权限分组（与后端 tool_group_key 键名一致；标签复用设置页文案） */
-const MCP_PERM_GROUPS = [
-  ['list_sessions', 'dialogs.mcpAllowListSessions'],
-  ['ssh_exec', 'dialogs.mcpAllowSshExec'],
-  ['sftp_read', 'dialogs.mcpAllowSftpRead'],
-  ['sftp_write', 'dialogs.mcpAllowSftpWrite'],
-  ['sftp_transfer', 'dialogs.mcpAllowSftpTransfer'],
-  ['terminal', 'dialogs.mcpAllowTerminal'],
-] as const;
 // TestConnectRequest 唯一源头 = Rust（term/bindings，经 types.ts re-export）
 
 /** session_test_connect 返回（Ok 值，不 Err） */
@@ -123,6 +115,11 @@ function ConnectForm({
   const [suUser, setSuUser] = useState(initial?.suUser ?? '');
   // MCP 工具权限覆盖：稀疏映射，键缺席 = 跟随全局（设置 → MCP 工具权限）
   const [mcpPerms, setMcpPerms] = useState<Record<string, boolean>>(initial?.mcpPerms ?? {});
+  // MCP 档位/生产标记覆盖：null = 继承分组策略/全局
+  const [mcpLevel, setMcpLevel] = useState<string | null>(initial?.mcpLevel ?? null);
+  const [mcpProduction, setMcpProduction] = useState<boolean | null>(
+    initial?.mcpProduction ?? null,
+  );
   const [suPassword, setSuPassword] = useState('');
   // 登录宏：进 shell 后逐行自动执行（多行文本；仅边综 trim 判空，正文原样存）
   const [loginMacro, setLoginMacro] = useState(initial?.loginMacro ?? '');
@@ -202,6 +199,8 @@ function ConnectForm({
           groupPath: presetGroup ?? initial?.groupPath ?? '',
           encoding,
           mcpPerms,
+          mcpLevel,
+          mcpProduction,
           tags: initial?.tags ?? [],
           command: command.trim() || null,
           createdAt: initial?.createdAt ?? '',
@@ -253,6 +252,8 @@ function ConnectForm({
         suUser: suUser.trim() || null,
         loginMacro: loginMacro.trim() ? loginMacro : null,
         mcpPerms,
+        mcpLevel,
+        mcpProduction,
         tags: initial?.tags ?? [],
         createdAt: initial?.createdAt ?? '',
         updatedAt: '',
@@ -667,6 +668,37 @@ function ConnectForm({
           <div className="text-xs">
             <p className="mb-2 text-neutral-500">{t('dialogs.mcpPermHint')}</p>
             <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-neutral-300">{t('dialogs.mcpLevel')}</span>
+                <select
+                  className="w-56 rounded border border-neutral-700 bg-neutral-800 px-2 py-1"
+                  value={mcpLevel ?? 'inherit'}
+                  onChange={(e) =>
+                    setMcpLevel(e.target.value === 'inherit' ? null : e.target.value)
+                  }
+                >
+                  <option value="inherit">{t('dialogs.mcpPermInherit')}</option>
+                  {MCP_LEVELS.map(([v, k]) => (
+                    <option key={v} value={v}>
+                      {t(k)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-neutral-300">{t('dialogs.mcpProduction')}</span>
+                <select
+                  className="w-56 rounded border border-neutral-700 bg-neutral-800 px-2 py-1"
+                  value={mcpProduction === null ? 'inherit' : mcpProduction ? 'yes' : 'no'}
+                  onChange={(e) =>
+                    setMcpProduction(e.target.value === 'inherit' ? null : e.target.value === 'yes')
+                  }
+                >
+                  <option value="inherit">{t('dialogs.mcpPermInherit')}</option>
+                  <option value="yes">{t('dialogs.mcpProductionYes')}</option>
+                  <option value="no">{t('dialogs.mcpProductionNo')}</option>
+                </select>
+              </div>
               {MCP_PERM_GROUPS.map(([group, labelKey]) => {
                 const v = mcpPerms[group];
                 return (
@@ -677,12 +709,8 @@ function ConnectForm({
                       value={v === undefined ? 'inherit' : v ? 'allow' : 'deny'}
                       onChange={(e) => {
                         const mode = e.target.value;
-                        // 跟随全局 = 键缺席（稀疏映射）；禁止动态 delete（lint）
-                        setMcpPerms((prev) => {
-                          const entries = Object.entries(prev).filter(([k]) => k !== group);
-                          if (mode !== 'inherit') entries.push([group, mode === 'allow']);
-                          return Object.fromEntries(entries);
-                        });
+                        // 继承 = 键缺席（稀疏映射）
+                        setMcpPerms((prev) => setPermMode(prev, group, mode));
                       }}
                     >
                       <option value="inherit">{t('dialogs.mcpPermInherit')}</option>

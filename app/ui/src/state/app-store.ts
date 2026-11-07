@@ -31,6 +31,22 @@ import { useTransferStore } from './transfer-store';
 import { tNow } from '../i18n';
 
 export type PaneState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error';
+
+/** MCP 危险命令审批请求（后端 mcp_ui.rs approval_request 帧 + 前端收到时刻） */
+export interface McpApprovalRequest {
+  type: 'approval_request';
+  id: string;
+  sessionId: string;
+  command: string;
+  expiresInMs: number;
+  sessionName?: string;
+  host?: string;
+  user?: string;
+  level?: string;
+  production?: boolean;
+  /** 前端收到时刻（Date.now），用于倒计时与到期自动关闭 */
+  receivedAt: number;
+}
 /** 底部 dock 页签（DevTools 风格工具面板）；单值天然互斥 */
 export type DockTab = 'sftp' | 'metrics' | 'tunnel' | 'transfer';
 /** 通知分级（批次一 7.7）：success/info 短时自动消失，warning 较长，error 常驻手动关 */
@@ -109,6 +125,12 @@ interface AppStore {
   /** 决策帧队列：多 pane 并发弹窗时逐个处理 */
   pendingHostKeys: HostKeyPromptFrame[];
   pendingKis: KiChallengeFrame[];
+  /** MCP 危险命令审批队列（逐个弹窗） */
+  pendingApprovals: McpApprovalRequest[];
+  /** 订阅 MCP 前端交互事件（App 挂载时调用一次） */
+  subscribeMcpUi(): void;
+  /** 应答审批并出队；到期未答的由弹窗以 allow=false 出队 */
+  answerApproval(id: string, allow: boolean): void;
 
   /** 打开连接对话框；editTarget=编辑既有会话，presetGroup=预填分组路径（分组菜单「新建连接」） */
   openConnect(editTarget?: SessionRecord, presetGroup?: string): void;
@@ -238,6 +260,9 @@ interface AppStore {
   shiftKi(): void;
 }
 
+/** MCP 交互事件订阅只建一次（HMR/StrictMode 重复挂载不重复订阅） */
+let mcpUiSubscribed = false;
+
 export const useAppStore = create<AppStore>((set, get) => {
   /** 标签活跃连接数（connected/connecting/reconnecting 计为活跃） */
   const countLive = (tab: Tab): number =>
@@ -312,6 +337,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     showConnect: false,
     pendingHostKeys: [],
     pendingKis: [],
+    pendingApprovals: [],
     editing: null,
     connectPreset: null,
     sessions: [],
@@ -367,6 +393,26 @@ export const useAppStore = create<AppStore>((set, get) => {
     toggleDock: (tab) => {
       if (get().dockTab === tab) get().closeDock();
       else get().openDock(tab);
+    },
+
+    subscribeMcpUi: () => {
+      if (mcpUiSubscribed) return;
+      mcpUiSubscribed = true;
+      const events = new Channel<Omit<McpApprovalRequest, 'receivedAt'>>();
+      events.onmessage = (frame) => {
+        if (frame.type !== 'approval_request') return;
+        set((s) =>
+          s.pendingApprovals.some((a) => a.id === frame.id)
+            ? s
+            : { pendingApprovals: [...s.pendingApprovals, { ...frame, receivedAt: Date.now() }] },
+        );
+      };
+      void invoke('mcp_ui_subscribe', { events });
+    },
+
+    answerApproval: (id, allow) => {
+      void invoke('mcp_approve', { id, allow }).catch(() => undefined);
+      set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) }));
     },
 
     subscribeTunnels: () => {

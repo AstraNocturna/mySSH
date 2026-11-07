@@ -40,18 +40,19 @@ Built-in MCP server (Streamable HTTP, loopback-only + Bearer token); one-click a
 | Tool | Description |
 | --- | --- |
 | `list_sessions` | List saved session profiles (never includes credentials) |
-| `ssh_exec` | Run a shell command on a session, returns stdout/stderr/exit code. Commands pass the built-in policy classifier (M0 read-only tier: whitelist allowed, blacklisted/unverifiable refused), per-session rate-limited, all attempts audited |
+| `ssh_exec` | Run a shell command on a session, returns stdout/stderr/exit code. Commands pass the built-in policy classifier at the session's access level; risky commands trigger an in-app approval popup (the call may return `pending_approval` — retry with the same arguments to keep waiting). Per-session rate-limited, all attempts audited |
 | `sftp_home` / `sftp_list` / `sftp_stat` / `sftp_read` | Remote browsing and file reads |
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | Remote writes and meta ops (audited) |
 | `sftp_upload` / `sftp_download` | File transfer via the background transfer queue (shared with the UI transfer panel, **no size limit**; `wait_seconds` waits synchronously for completion) |
 | `sftp_transfer_list` | Poll transfer progress / state / errors |
 | `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` | Interactive terminals: open a live shell on a session, send input, read the screen buffer, close it — for REPLs, pagers and other stateful interactions `ssh_exec` can't drive (own `terminal` permission group, **off by default**: raw keystrokes cannot pass the command policy) |
 
-**Permission model** (three layers):
+**Permission model** (resolved session → nearest group → global):
 
-1. Global defaults: Settings → MCP → Tool permissions — 6 group toggles (list_sessions / ssh_exec / SFTP read / SFTP write / SFTP transfer / terminal; terminal is off by default)
-2. Per-session overrides: session editor → MCP Permissions tab — each group is tri-state (inherit / allow / deny). Lock down `ssh_exec` on production, keep test boxes wide open
-3. Command policy (always on): `ssh_exec` commands are classified before execution — read-only whitelist allowed, blacklist / indirect shells / unparseable structures refused (fail-closed; no agent-driven confirmation channel yet); per-session rate limit via `mcp.rate_limit_per_minute` (default 60/min); every attempt lands in the audit log
+1. Global defaults: Settings → MCP — 6 tool-group toggles (list_sessions / ssh_exec / SFTP read / SFTP write / SFTP transfer / terminal; terminal is off by default) and the access level (read-only by default / standard / full)
+2. Group policies: right-click a group → MCP Policy — tool groups, access level and a production flag, inherited by subgroups and their sessions
+3. Per-session overrides: session editor → MCP Permissions tab — every field can inherit or override. Lock down `ssh_exec` on production, keep test boxes wide open
+4. Command policy (always on): `ssh_exec` commands are classified before execution. Read-only: whitelist only. Standard: anything not provably read-only needs approval. Full: only blacklisted commands need approval. Blacklist, indirect shells and unparseable structures always need approval, and so does every non-read-only command on a production session. Approval is an in-app popup (deny is the default focus, auto-deny after 5 minutes); with no app window available it fails closed. Per-session rate limit via `mcp.rate_limit_per_minute` (default 60/min); every attempt and decision lands in the audit log
 
 Config example (`.omp/mcp.json`, same shape for Claude Code):
 

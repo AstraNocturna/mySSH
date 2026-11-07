@@ -16,6 +16,7 @@ import { AppToolbar } from './components/AppToolbar';
 import { CommandPalette } from './components/CommandPalette';
 import { ConnectDialog } from './components/ConnectDialog';
 import { HostKeyDialog } from './components/HostKeyDialog';
+import { ApprovalDialog } from './components/ApprovalDialog';
 import { KiDialog } from './components/KiDialog';
 import { BottomDock } from './components/BottomDock';
 import { TransferIndicator } from './components/TransferIndicator';
@@ -38,6 +39,7 @@ export function App() {
   const activeId = useAppStore((s) => s.activeId);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
   const subscribeTunnels = useAppStore((s) => s.subscribeTunnels);
+  const subscribeMcpUi = useAppStore((s) => s.subscribeMcpUi);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const paletteOpen = useAppStore((s) => s.paletteOpen);
   const pendingDeleteSession = useAppStore((s) => s.pendingDeleteSession);
@@ -84,6 +86,10 @@ export function App() {
   useEffect(() => {
     subscribeTunnels();
   }, [subscribeTunnels]);
+
+  useEffect(() => {
+    subscribeMcpUi();
+  }, [subscribeMcpUi]);
 
   // 启动静默检查更新（轴一 1.2）：发现新版本弹确认框；检查失败不打扰
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -259,6 +265,7 @@ export function App() {
       <ConnectDialog />
       <QuickConnectDialog />
       <HostKeyDialog />
+      <ApprovalDialog />
       <KiDialog />
       {paletteOpen && <CommandPalette />}
       {settingsOpen && <SettingsDialog />}
