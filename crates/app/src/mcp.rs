@@ -1,6 +1,6 @@
 //! MCP 服务端：让 AI 客户端（Claude Code 等）在已保存的 SSH 会话上执行命令。
 //!
-//! 传输为 MCP Streamable HTTP（2025-03-26 子集）：单端点 POST /mcp，
+//! 传输为 MCP Streamable HTTP（2025-03-26 ~ 2025-11-25 子集）：单端点 POST /mcp，
 //! 每次请求独立 JSON 响应（不开 SSE 流）；仅绑定 127.0.0.1。
 //! 工具面：list_sessions（列会话档案，不含凭据）、ssh_exec（一次性 Bulk
 //! 连接跑命令，收集 stdout/stderr/exit code）、terminal_*（open/send/read/
@@ -53,6 +53,19 @@ const DEFAULT_RATE_PER_MINUTE: u32 = 60;
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
 const SESSION_ID_HEADER: HeaderName = HeaderName::from_static("mcp-session-id");
+const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("mcp-protocol-version");
+
+/// 支持的协议版本（新→旧）。服务端无会话状态、不发服务端请求，各版本差异
+///（批量请求移除、MCP-Protocol-Version 头、工具注解等）对本实现均为增量兼容。
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
+
+/// initialize 版本协商：客户端版本受支持则回显，否则给出本端最新版本由客户端决定是否断开
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    requested
+        .and_then(|v| SUPPORTED_PROTOCOL_VERSIONS.iter().find(|s| **s == v))
+        .copied()
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
+}
 
 /// MCP 服务运行参数（读自 core-store settings KV）
 struct McpConfig {
@@ -511,6 +524,24 @@ async fn mcp_post(
         }
     }
 
+    // 2025-06-18 起客户端在 initialize 之后的请求带 MCP-Protocol-Version；不支持的版本按规范回 400
+    if let Some(v) = headers
+        .get(&PROTOCOL_VERSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&v) {
+            return respond(
+                StatusCode::BAD_REQUEST,
+                Some(rpc_error(
+                    Value::Null,
+                    -32600,
+                    &format!("不支持的 MCP-Protocol-Version：{v}"),
+                )),
+                &headers,
+            );
+        }
+    }
+
     let req: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -591,11 +622,13 @@ enum Outcome {
     Error(i64, String),
 }
 
-/// JSON-RPC 方法分发（Streamable HTTP 2025-03-26 子集）
+/// JSON-RPC 方法分发（Streamable HTTP 子集，版本见 SUPPORTED_PROTOCOL_VERSIONS）
 async fn dispatch(st: &ServerState, method: &str, req: &Value) -> Outcome {
     match method {
         "initialize" => Outcome::Result(json!({
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": negotiate_protocol_version(
+                req.pointer("/params/protocolVersion").and_then(Value::as_str)
+            ),
             "serverInfo": { "name": "myssh", "version": env!("CARGO_PKG_VERSION") },
             "capabilities": { "tools": {} },
         })),
@@ -881,8 +914,42 @@ fn tools_list(perms: &McpPerms) -> Value {
                 .and_then(Value::as_str)
                 .is_some_and(|n| perms.allows(n))
         });
+        for tool in tools.iter_mut() {
+            if let Some(a) = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .map(tool_annotations)
+            {
+                tool["annotations"] = a;
+            }
+        }
     }
     v
+}
+
+/// 工具行为注解（MCP 2025-03-26 起）：供客户端决定是否自动批准、如何提示风险。
+/// 只是提示，不是安全边界——真正的拦截在权限闸与命令策略。
+/// ssh_exec / terminal_send 能执行任意命令，按可破坏性标注；未列出的工具不给注解。
+fn tool_annotations(name: &str) -> Value {
+    // (readOnly, destructive, idempotent, openWorld)
+    let (ro, destructive, idempotent, open_world) = match name {
+        "list_sessions" => (true, false, true, false),
+        "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "sftp_transfer_list"
+        | "terminal_read" => (true, false, true, true),
+        "ssh_exec" | "terminal_send" => (false, true, false, true),
+        "terminal_open" | "terminal_close" | "sftp_mkdir" => (false, false, false, true),
+        "sftp_write" | "sftp_delete" | "sftp_chmod" | "sftp_upload" | "sftp_download" => {
+            (false, true, true, true)
+        }
+        "sftp_rename" => (false, true, false, true),
+        _ => return Value::Null,
+    };
+    json!({
+        "readOnlyHint": ro,
+        "destructiveHint": destructive,
+        "idempotentHint": idempotent,
+        "openWorldHint": open_world,
+    })
 }
 
 /// MCP content 结果包装
@@ -1581,6 +1648,31 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_carries_annotations() {
+        let all = tools_list(&all_perms());
+        for tool in all["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            let a = &tool["annotations"];
+            assert!(a.is_object(), "{name} 缺 annotations");
+            let ro = a["readOnlyHint"].as_bool().unwrap();
+            let destructive = a["destructiveHint"].as_bool().unwrap();
+            assert!(!(ro && destructive), "{name} 不能既只读又可破坏");
+        }
+        let hint = |n: &str| tool_annotations(n)["readOnlyHint"].as_bool().unwrap();
+        assert!(hint("sftp_read") && hint("terminal_read") && hint("list_sessions"));
+        assert!(!hint("ssh_exec") && !hint("terminal_send") && !hint("sftp_write"));
+    }
+
+    #[test]
+    fn protocol_version_negotiation() {
+        assert_eq!(negotiate_protocol_version(Some("2025-06-18")), "2025-06-18");
+        assert_eq!(negotiate_protocol_version(Some("2025-03-26")), "2025-03-26");
+        // 未知/缺省 → 本端最新
+        assert_eq!(negotiate_protocol_version(Some("1999-01-01")), "2025-11-25");
+        assert_eq!(negotiate_protocol_version(None), "2025-11-25");
+    }
+
+    #[test]
     fn terminal_setting_absent_means_deny() {
         assert!(!parse_bool_setting(None));
         assert!(parse_bool_setting(Some("true")));
@@ -1646,8 +1738,24 @@ mod tests {
         let store = Arc::new(Store::open(&dir.join("t.db")).await.expect("开库失败"));
         let (mgr, url) = boot_mcp(store).await;
 
-        let init = rpc(&url, "initialize", json!({})).await;
+        let init = rpc(
+            &url,
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18" }),
+        )
+        .await;
         assert_eq!(init["serverInfo"]["name"], "myssh");
+        assert_eq!(init["protocolVersion"], "2025-06-18");
+
+        // 不支持的 MCP-Protocol-Version 头 → 400
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header("MCP-Protocol-Version", "1999-01-01")
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
         let tools = rpc(&url, "tools/list", json!({})).await;
         assert_eq!(tools["tools"].as_array().unwrap().len(), 18);
 
