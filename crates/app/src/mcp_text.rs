@@ -3,6 +3,8 @@
 //! 按字节流增量处理：非末块时，末尾不完整的转义序列 / UTF-8 字符 / 孤立 \r 不消费，
 //! 返回已消费字节数，调用方据此推进 offset，下次读取从断点续上，不会吐出半截 `[0m`。
 
+use std::collections::VecDeque;
+
 /// 剥离 ANSI 序列与控制字符。返回 (文本, 已消费输入字节数)。
 /// `final_chunk=true` 表示输入已到流尾（进程退出/终端关闭），尾部残缺序列直接丢弃。
 pub(crate) fn strip_ansi(input: &[u8], final_chunk: bool) -> (String, usize) {
@@ -52,6 +54,72 @@ pub(crate) fn strip_ansi(input: &[u8], final_chunk: bool) -> (String, usize) {
     (String::from_utf8_lossy(&out).into_owned(), consumed)
 }
 
+/// 分页读取用的剥离：整段都是残缺序列（页过小）时按流尾处理，保证游标前进
+pub(crate) fn strip_ansi_page(raw: &[u8], at_end: bool) -> (String, usize) {
+    match strip_ansi(raw, at_end) {
+        (_, 0) if !raw.is_empty() => strip_ansi(raw, true),
+        r => r,
+    }
+}
+
+/// 有界输出收集：超限时保留头尾各一半、丢中间（报错与汇总通常在末尾）
+pub(crate) struct HeadTail {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    half: usize,
+    omitted: u64,
+}
+
+impl HeadTail {
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            head: Vec::new(),
+            tail: VecDeque::new(),
+            half: cap / 2,
+            omitted: 0,
+        }
+    }
+
+    pub(crate) fn push(&mut self, data: &[u8]) {
+        let room = self.half.saturating_sub(self.head.len()).min(data.len());
+        self.head.extend_from_slice(&data[..room]);
+        self.tail.extend(&data[room..]);
+        if self.tail.len() > self.half {
+            let drop = self.tail.len() - self.half;
+            self.tail.drain(..drop);
+            self.omitted += drop as u64;
+        }
+    }
+
+    pub(crate) fn omitted(&self) -> u64 {
+        self.omitted
+    }
+
+    pub(crate) fn render(&self, strip: bool) -> String {
+        let conv = |b: &[u8]| {
+            if strip {
+                strip_ansi(b, true).0
+            } else {
+                String::from_utf8_lossy(b).into_owned()
+            }
+        };
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        if self.omitted == 0 {
+            let mut all = self.head.clone();
+            all.extend_from_slice(&tail);
+            return conv(&all);
+        }
+        // 切点可能落在多字节字符中间：头段去掉残缺尾字符，尾段跳过续字节
+        let head = &self.head[..utf8_safe_end(&self.head)];
+        let skip = tail.iter().take_while(|&&c| c & 0xC0 == 0x80).count();
+        format!(
+            "{}\n…[中间省略 {} 字节]…\n{}",
+            conv(head),
+            self.omitted,
+            conv(&tail[skip..])
+        )
+    }
+}
 /// 退格：删掉上一个字符（不跨行；多字节 UTF-8 整体删除）
 fn pop_char(out: &mut Vec<u8>) {
     if out.last().is_none_or(|&c| c == b'\n') {
@@ -167,6 +235,30 @@ mod tests {
             let (t2, _) = strip_ansi(&full[used..], true);
             assert_eq!(format!("{t1}{t2}"), "a红\nb", "cut={cut}");
         }
+    }
+
+    #[test]
+    fn head_tail_keeps_both_ends() {
+        let mut h = HeadTail::new(8);
+        h.push(b"abcdefgh");
+        assert_eq!(h.omitted(), 0);
+        assert_eq!(h.render(false), "abcdefgh");
+        h.push(b"ijklmn");
+        assert_eq!(h.omitted(), 6);
+        let r = h.render(false);
+        assert!(r.starts_with("abcd\n") && r.ends_with("\nklmn"), "{r}");
+        // 尾段切在多字节字符中间不产生乱码
+        let mut u = HeadTail::new(8);
+        u.push("ab中文字".as_bytes());
+        assert_eq!(u.render(false), "ab\n…[中间省略 3 字节]…\n字");
+    }
+
+    #[test]
+    fn page_strip_always_advances() {
+        let (t, used) = strip_ansi_page(b"\x1b[3", false);
+        assert_eq!((t.as_str(), used), ("", 3));
+        let (t, used) = strip_ansi_page(b"ok\x1b[3", false);
+        assert_eq!((t.as_str(), used), ("ok", 2));
     }
 
     #[test]

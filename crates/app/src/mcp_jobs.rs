@@ -287,39 +287,22 @@ pub(crate) async fn job_read(jobs: &Arc<McpJobs>, args: &Value) -> Result<String
     let job = jobs.get(id)?;
     let deadline = Instant::now() + Duration::from_secs(wait);
     loop {
-        {
+        let ready = {
             let b = job.out.lock();
-            if offset < b.total || b.closed || Instant::now() >= deadline {
-                let start = b.start();
-                let from = offset.max(start);
-                let skip = (from - start) as usize;
-                let avail = (b.total - from) as usize;
-                let take = avail.min(max);
-                let raw: Vec<u8> = b.buf.iter().skip(skip).take(take).copied().collect();
-                let at_end = b.closed && take == avail;
-                drop(b);
-                let (data, used) = if strip {
-                    match crate::mcp_text::strip_ansi(&raw, at_end) {
-                        // 整段都是残缺序列（max_bytes 过小）：按流尾处理，保证游标前进
-                        (_, 0) if !raw.is_empty() => crate::mcp_text::strip_ansi(&raw, true),
-                        r => r,
-                    }
-                } else {
-                    (String::from_utf8_lossy(&raw).into_owned(), raw.len())
-                };
-                let next = from + used as u64;
-                let mut v = job.summary(id);
-                v["data"] = json!(data);
-                v["nextOffset"] = json!(next);
-                v["more"] = json!(next < job.out.lock().total);
-                v["truncated"] = json!(offset < start);
-                return Ok(v.to_string());
-            }
+            offset < b.total || b.closed
+        };
+        if ready || Instant::now() >= deadline {
+            let page = crate::mcp_terminal::read_page(&job.out, offset, max, strip);
+            let mut v = job.summary(id);
+            v["data"] = json!(page.data);
+            v["nextOffset"] = json!(page.next);
+            v["more"] = json!(page.more);
+            v["truncated"] = json!(page.truncated);
+            return Ok(v.to_string());
         }
         tokio::time::sleep(READ_POLL).await;
     }
 }
-
 pub(crate) async fn job_stop(jobs: &Arc<McpJobs>, args: &Value) -> Result<String, String> {
     let id = req_job_id(args, "job_stop")?;
     let job = jobs.get(id)?;

@@ -40,7 +40,7 @@
 | 工具 | 说明 |
 | --- | --- |
 | `list_sessions` | 列出会话档案（不含凭据） |
-| `ssh_exec` | 在会话上执行 shell 命令，返回 stdout/stderr/exit code。命令按会话的访问档位过内置策略分类器；高风险命令弹出应用内确认框（调用可能返回 `pending_approval`，用相同参数重试即继续等待）。按会话限速，全部尝试落审计 |
+| `ssh_exec` | 在会话上执行 shell 命令，返回 stdout/stderr/exit code。命令按会话的访问档位过内置策略分类器；高风险命令弹出应用内确认框（调用可能返回 `pending_approval`，用相同参数重试即继续等待）。按会话限速，全部尝试落审计。输出省 token：剥离 ANSI 序列，超长输出保留头尾 |
 | `sftp_home` / `sftp_list` / `sftp_stat` / `sftp_read` | 远端浏览与读文件 |
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | 远端写入与元操作（落审计） |
 | `sftp_upload` / `sftp_download` | 文件传输：入队后台传输队列执行（与 UI 传输面板共享，**无大小上限**；`wait_seconds` 可同步等待终态） |
@@ -48,7 +48,7 @@
 | `file_view` / `file_edit` / `file_grep` / `file_glob` | 远程文件：带行号分页查看、精确字符串替换编辑（唯一匹配 + etag 防并发覆盖）、正则搜索、glob 查找——全部经 SFTP，不执行远端命令 |
 | `file_backups` / `file_rollback` | AI 改动自动备份与回滚：`file_edit` / `sftp_write` / `sftp_delete` 改前自动备份原内容；文件在改动后又被他人修改时默认拒绝回滚。侧边栏会话右键「AI 文件改动…」可一键回滚 |
 | `job_start` / `job_read` / `job_stop` / `job_list` | 后台命令：长时间运行的命令（构建、`tail -f`、长下载）后台启动立即返回，按字节游标分段读取输出（默认剥离 ANSI 控制序列、折叠进度条），可随时停止；命令门与 `ssh_exec` 相同，属 `ssh_exec` 权限组 |
-| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` / `terminal_list` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互。窗口在线时以普通标签打开，可旁观、你键入时 AI 暂停写入、右键随时收回控制；也可右键把已有标签「共享给 AI」（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略） |
+| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` / `terminal_list` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互。`terminal_read` 可在服务端等待提示符正则（`wait_for`）或输出静默（`idle_ms`），判定命令执行完毕而无需反复轮询。窗口在线时以普通标签打开，可旁观、你键入时 AI 暂停写入、右键随时收回控制；也可右键把已有标签「共享给 AI」（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略） |
 
 **权限模型**（按 会话 → 最近的分组 → 全局 解析）：
 
