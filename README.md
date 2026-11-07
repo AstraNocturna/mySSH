@@ -45,6 +45,8 @@ Built-in MCP server (Streamable HTTP, loopback-only + Bearer token); one-click a
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | Remote writes and meta ops (audited) |
 | `sftp_upload` / `sftp_download` | File transfer via the background transfer queue (shared with the UI transfer panel, **no size limit**; `wait_seconds` waits synchronously for completion) |
 | `sftp_transfer_list` | Poll transfer progress / state / errors |
+| `file_view` / `file_edit` / `file_grep` / `file_glob` | Remote files: paged view with line numbers, exact string-replace edits (unique match + etag guard against concurrent changes), regex search, glob find — all over SFTP, no remote command execution |
+| `file_backups` / `file_rollback` | Automatic backup and rollback of AI changes: `file_edit` / `sftp_write` / `sftp_delete` back up the original first; rollback is refused by default if someone changed the file afterwards. Right-click a session → "AI File Changes…" for one-click rollback |
 | `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` / `terminal_list` | Interactive terminals: open a live shell on a session, send input, read the screen buffer, close it — for REPLs, pagers and other stateful interactions `ssh_exec` can't drive. When the window is open the terminal appears as a normal tab: watch it, AI writes pause while you type, right-click to take back control; you can also right-click an existing tab to "Share with AI" (own `terminal` permission group, **off by default**: raw keystrokes cannot pass the command policy) |
 
 **Permission model** (resolved session → nearest group → global):
