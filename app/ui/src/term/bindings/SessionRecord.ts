@@ -40,4 +40,12 @@ loginMacro?: string | null,
  * MCP 工具权限覆盖（稀疏映射，键 = 分组名 list_sessions/ssh_exec/sftp_read/
  * sftp_write/sftp_transfer）；缺省空 = 全部跟随全局 mcp.allow.* 设置
  */
-mcpPerms: Record<string, boolean>, tags: Array<string>, command?: string | null, createdAt: string, updatedAt: string, };
+mcpPerms: Record<string, boolean>, 
+/**
+ * MCP 访问档位覆盖（readonly/standard/full）；None = 跟随分组/全局
+ */
+mcpLevel?: string | null, 
+/**
+ * 生产标记覆盖：生产会话上任何无法证明只读的命令都须人工确认；None = 跟随分组
+ */
+mcpProduction?: boolean | null, tags: Array<string>, command?: string | null, createdAt: string, updatedAt: string, };

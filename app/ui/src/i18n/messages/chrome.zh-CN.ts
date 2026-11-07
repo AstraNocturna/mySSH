@@ -130,6 +130,7 @@ export const zhChrome = {
   'chrome.menuUnfavorite': '取消收藏',
   'chrome.menuDelete': '删除',
   'chrome.menuMoveTo': '移动到分组',
+  'chrome.menuMcpPolicy': 'MCP 策略…',
   'chrome.menuMoveToBatch': '移动到分组（{count}）',
   'chrome.menuFavoriteBatch': '添加收藏（{count}）',
   'chrome.menuDeleteBatch': '删除（{count}）…',

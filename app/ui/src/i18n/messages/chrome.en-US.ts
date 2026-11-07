@@ -136,6 +136,7 @@ export const enChrome: Record<keyof typeof zhChrome, string> = {
   'chrome.menuUnfavorite': 'Remove Favorite',
   'chrome.menuDelete': 'Delete',
   'chrome.menuMoveTo': 'Move to Group',
+  'chrome.menuMcpPolicy': 'MCP Policy…',
   'chrome.menuMoveToBatch': 'Move to Group ({count})',
   'chrome.menuFavoriteBatch': 'Add Favorite ({count})',
   'chrome.menuDeleteBatch': 'Delete ({count})…',

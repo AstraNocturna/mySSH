@@ -7,8 +7,11 @@ import {
   flattenVisible,
   isValidGroupPath,
   rangeSessionIds,
+  isEmptyPolicy,
   readFailedList,
+  readGroupPolicies,
   readStringList,
+  remapGroupPolicies,
   rewritePathOnDeleteKeep,
   rewritePathOnRename,
   sshCommand,
@@ -153,5 +156,40 @@ describe('sshCommand', () => {
 
   it('直连无额外参数', () => {
     expect(sshCommand(rec('a', ''), [])).toBe('ssh -p 22 ops@ha.example.com');
+  });
+});
+
+describe('MCP 分组策略键迁移', () => {
+  const policies = {
+    生产: { perms: {}, level: 'readonly', production: true },
+    '生产/华东': { perms: { ssh_exec: false } },
+    开发: { perms: {}, level: 'full' },
+  };
+
+  it('改名：自身与子分组键随前缀改写，无关分组不动', () => {
+    const out = remapGroupPolicies(
+      policies,
+      (p) => rewritePathOnRename([p], '生产', 'prod')[0] ?? null,
+    );
+    expect(Object.keys(out).sort()).toEqual(['prod', 'prod/华东', '开发'].sort());
+    expect(out['prod/华东'].perms).toEqual({ ssh_exec: false });
+  });
+
+  it('删除保留会话：被删分组策略丢弃，子分组策略上移', () => {
+    const out = remapGroupPolicies(policies, (p) =>
+      p === '生产' ? null : (rewritePathOnDeleteKeep([p], '生产')[0] ?? null),
+    );
+    expect(out['生产']).toBeUndefined();
+    expect(out['华东'].perms).toEqual({ ssh_exec: false });
+    expect(out['开发'].level).toBe('full');
+  });
+
+  it('脏数据容忍与空策略判定', () => {
+    expect(readGroupPolicies(null)).toEqual({});
+    expect(readGroupPolicies([1])).toEqual({});
+    expect(Object.keys(readGroupPolicies({ a: { perms: {} }, b: 3 }))).toEqual(['a']);
+    expect(isEmptyPolicy({ perms: {} })).toBe(true);
+    expect(isEmptyPolicy({ perms: {}, level: null, production: null })).toBe(true);
+    expect(isEmptyPolicy({ perms: {}, production: false })).toBe(false);
   });
 });

@@ -112,6 +112,14 @@ pub struct SessionRecord {
     #[serde(default)]
     #[ts(type = "Record<string, boolean>")]
     pub mcp_perms: std::collections::HashMap<String, bool>,
+    /// MCP 访问档位覆盖（readonly/standard/full）；None = 跟随分组/全局
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub mcp_level: Option<String>,
+    /// 生产标记覆盖：生产会话上任何无法证明只读的命令都须人工确认；None = 跟随分组
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub mcp_production: Option<bool>,
     pub tags: Vec<String>,
     #[ts(optional = nullable)]
     pub command: Option<String>,
@@ -123,8 +131,8 @@ pub struct SessionRepo {
     pool: SqlitePool,
 }
 
-const LIST_SQL: &str = "SELECT id,name,kind,host,shell,workdir,port,username,auth_type,key_path,group_path,tags,command,jump_chain,created_at,updated_at,color,encoding,su_user,login_macro,mcp_perms FROM sessions ORDER BY group_path, name";
-const GET_SQL: &str = "SELECT id,name,kind,host,shell,workdir,port,username,auth_type,key_path,group_path,tags,command,jump_chain,created_at,updated_at,color,encoding,su_user,login_macro,mcp_perms FROM sessions WHERE id = ?";
+const LIST_SQL: &str = "SELECT id,name,kind,host,shell,workdir,port,username,auth_type,key_path,group_path,tags,command,jump_chain,created_at,updated_at,color,encoding,su_user,login_macro,mcp_perms,mcp_level,mcp_production FROM sessions ORDER BY group_path, name";
+const GET_SQL: &str = "SELECT id,name,kind,host,shell,workdir,port,username,auth_type,key_path,group_path,tags,command,jump_chain,created_at,updated_at,color,encoding,su_user,login_macro,mcp_perms,mcp_level,mcp_production FROM sessions WHERE id = ?";
 
 /// 终端编码缺省值（旧数据/旧导出兼容）
 fn default_encoding() -> String {
@@ -334,8 +342,8 @@ where
     let mcp_perms =
         serde_json::to_string(&rec.mcp_perms).map_err(|e| StoreError::Corrupt(e.to_string()))?;
     sqlx::query(
-        "INSERT INTO sessions (id,name,kind,host,shell,workdir,port,username,auth_type,key_path,group_path,color,encoding,su_user,login_macro,tags,command,jump_chain,mcp_perms,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+        "INSERT INTO sessions (id,name,kind,host,shell,workdir,port,username,auth_type,key_path,group_path,color,encoding,su_user,login_macro,tags,command,jump_chain,mcp_perms,mcp_level,mcp_production,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
          ON CONFLICT(id) DO UPDATE SET
            name=excluded.name, kind=excluded.kind, host=excluded.host, shell=excluded.shell, workdir=excluded.workdir, port=excluded.port,
            username=excluded.username, auth_type=excluded.auth_type,
@@ -344,6 +352,7 @@ where
            login_macro=excluded.login_macro,
            tags=excluded.tags, command=excluded.command,
            jump_chain=excluded.jump_chain, mcp_perms=excluded.mcp_perms,
+           mcp_level=excluded.mcp_level, mcp_production=excluded.mcp_production,
            updated_at=datetime('now')",
     )
     .bind(&rec.id)
@@ -365,6 +374,8 @@ where
     .bind(&rec.command)
     .bind(jump_chain)
     .bind(mcp_perms)
+    .bind(&rec.mcp_level)
+    .bind(rec.mcp_production)
     .execute(ex)
     .await
     .map_err(db)?;
@@ -405,6 +416,8 @@ fn row_to_record(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord, StoreEr
         login_macro: row.get("login_macro"),
         mcp_perms: serde_json::from_str(&mcp_perms_raw)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?,
+        mcp_level: row.get("mcp_level"),
+        mcp_production: row.get("mcp_production"),
         tags: serde_json::from_str(&tags_raw).map_err(|e| StoreError::Corrupt(e.to_string()))?,
         jump_chain: serde_json::from_str(&jump_raw)
             .map_err(|e| StoreError::Corrupt(e.to_string()))?,

@@ -48,6 +48,8 @@ fn sample(id: &str, name: &str) -> SessionRecord {
         su_user: None,
         login_macro: None,
         mcp_perms: std::collections::HashMap::new(),
+        mcp_level: None,
+        mcp_production: None,
         tags: vec!["prod".into(), "web".into()],
         jump_chain: vec![],
         command: None,
@@ -74,7 +76,15 @@ async fn session_crud_and_list() {
     changed.port = 2222;
     changed.color = Some("#e5484d".into());
     changed.login_macro = Some("cd /data/app\ntail -f logs/app.log".into());
+    changed.mcp_level = Some("standard".into());
+    changed.mcp_production = Some(true);
     let rec = store.sessions().upsert(&changed).await.expect("update");
+    assert_eq!(
+        rec.mcp_level.as_deref(),
+        Some("standard"),
+        "mcp_level 落库往返"
+    );
+    assert_eq!(rec.mcp_production, Some(true), "mcp_production 落库往返");
     assert_eq!(rec.name, "生产 Web-02");
     assert_eq!(rec.port, 2222);
     assert_eq!(rec.color.as_deref(), Some("#e5484d"), "color 落库往返");
@@ -91,6 +101,8 @@ async fn session_crud_and_list() {
         .expect("update2");
     assert_eq!(rec.color, None);
     assert_eq!(rec.login_macro, None);
+    assert_eq!(rec.mcp_level, None);
+    assert_eq!(rec.mcp_production, None);
 
     store
         .sessions()

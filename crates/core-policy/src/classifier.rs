@@ -184,7 +184,9 @@ impl PolicyEngine {
         if has_unproven {
             return match level {
                 AccessLevel::Readonly => Verdict::Deny,
-                AccessLevel::Standard | AccessLevel::Full => Verdict::RequireConfirmation,
+                AccessLevel::Standard => Verdict::RequireConfirmation,
+                // full：普通写操作放行；黑名单/间接执行/解析失败/生产会话已在上面强制确认
+                AccessLevel::Full => Verdict::Allow,
             };
         }
         Verdict::Allow

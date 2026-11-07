@@ -14,8 +14,9 @@
 //! 交互字节流无法过命令分类器，开启即等于放开任意命令；tools/list 同步过滤，
 //! tools/call 命中禁用组返回 isError）。会话编辑器可逐组覆盖
 //!（sessions.mcp_perms 稀疏映射），会话级覆盖优先于全局。
-//! ssh_exec 命令经 core-policy 分类器判定（M0 readonly 档：只读白名单放行，黑名单/
-//! 无法静态判定一律拒绝——MCP 无人工确认通道），
+//! ssh_exec 命令经 core-policy 分类器判定，档位（mcp.level：readonly/standard/full）与
+//! 生产标记按 会话 → 分组策略（mcp.group_policies）→ 全局 解析（mcp_policy.rs）；
+//! 需人工确认者推应用内审批弹窗（mcp_ui.rs），用户未决返回 pending，窗口不可用 fail-closed；
 //! 并按会话限速（设置键 mcp.rate_limit_per_minute，默认 60/分钟）；全部尝试落审计。
 //! 生命周期由 lib.rs 装配：setup 时按 mcp.enabled/mcp.port/mcp.token 启动，
 //! mcp_restart 命令供设置变更后重载。
@@ -35,7 +36,7 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use core_policy::{AccessLevel, PolicyEngine, RateLimiter, Verdict};
+use core_policy::{PolicyEngine, RateLimiter, Verdict};
 use core_sftp::OnExists;
 use core_store::Store;
 
@@ -135,7 +136,7 @@ impl McpPerms {
     }
 }
 
-/// 有效权限：会话级覆盖（sessions.mcp_perms）优先，缺省回退全局快照。
+/// 有效权限：会话级覆盖（sessions.mcp_perms）→ 最近祖先分组策略 → 全局快照。
 /// 会话不存在时按全局放行——工具自身会报 NotFound。
 async fn tool_allowed(st: &ServerState, name: &str, args: &Value) -> bool {
     let global = st.perms.allows(name);
@@ -155,7 +156,10 @@ async fn tool_allowed(st: &ServerState, name: &str, args: &Value) -> bool {
         },
     };
     match st.store.sessions().get(&sid).await {
-        Ok(rec) => rec.mcp_perms.get(key).copied().unwrap_or(global),
+        Ok(rec) => {
+            let groups = crate::mcp_policy::load_group_policies(&st.store).await;
+            crate::mcp_policy::resolve_perm(&rec, &groups, key, global)
+        }
         Err(_) => global,
     }
 }
@@ -274,6 +278,16 @@ async fn ensure_token(store: &Store, token: Option<String>) -> String {
     token
 }
 
+/// MCP 服务依赖的应用级共享状态（随应用同生命周期，跨 MCP 重启保留）
+#[derive(Clone)]
+pub struct McpDeps {
+    pub store: Arc<Store>,
+    pub sftp: Arc<crate::sftp::SftpManagerState>,
+    pub exec: Arc<crate::exec::ExecManagerState>,
+    pub terms: Arc<crate::mcp_terminal::McpTerminalState>,
+    pub ui: Arc<crate::mcp_ui::McpUiHub>,
+}
+
 /// MCP 服务生命周期管理：持有 tokio task + shutdown watch
 #[derive(Default)]
 pub struct McpManager {
@@ -296,24 +310,28 @@ impl McpManager {
     }
 
     /// 启动服务（已有实例先停）。绑定失败返回清晰错误，不 panic。
-    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         self: &Arc<Self>,
-        store: Arc<Store>,
-        sftp: Arc<crate::sftp::SftpManagerState>,
-        exec: Arc<crate::exec::ExecManagerState>,
-        terms: Arc<crate::mcp_terminal::McpTerminalState>,
+        deps: McpDeps,
         port: u16,
         token: String,
         perms: McpPerms,
         rate_per_minute: u32,
     ) -> Result<(), String> {
         self.stop().await;
+        let McpDeps {
+            store,
+            sftp,
+            exec,
+            terms,
+            ui,
+        } = deps;
         let state = Arc::new(ServerState {
             store,
             sftp,
             exec,
             terms: terms.clone(),
+            ui,
             token: token.clone(),
             perms,
             // 安全模型执行面（M0 只读档）：判定管线 + 每会话速率闸，随服务同生命周期
@@ -394,14 +412,8 @@ impl McpManager {
     }
 }
 
-pub async fn boot_from_settings(
-    mgr: Arc<McpManager>,
-    store: Arc<Store>,
-    sftp: Arc<crate::sftp::SftpManagerState>,
-    exec: Arc<crate::exec::ExecManagerState>,
-    terms: Arc<crate::mcp_terminal::McpTerminalState>,
-) {
-    let cfg = match read_mcp_config(&store).await {
+pub async fn boot_from_settings(mgr: Arc<McpManager>, deps: McpDeps) {
+    let cfg = match read_mcp_config(&deps.store).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "读取 MCP 设置失败，跳过启动");
@@ -411,48 +423,24 @@ pub async fn boot_from_settings(
     if !cfg.enabled {
         return;
     }
-    let token = ensure_token(&store, cfg.token).await;
+    let token = ensure_token(&deps.store, cfg.token).await;
     if let Err(e) = mgr
-        .start(
-            store,
-            sftp,
-            exec,
-            terms,
-            cfg.port,
-            token,
-            cfg.perms,
-            cfg.rate_per_minute,
-        )
+        .start(deps, cfg.port, token, cfg.perms, cfg.rate_per_minute)
         .await
     {
         tracing::error!(error = %e, "MCP 服务启动失败");
     }
 }
 
-pub async fn restart_from_settings(
-    mgr: &Arc<McpManager>,
-    store: Arc<Store>,
-    sftp: Arc<crate::sftp::SftpManagerState>,
-    exec: Arc<crate::exec::ExecManagerState>,
-    terms: Arc<crate::mcp_terminal::McpTerminalState>,
-) -> Result<Value, String> {
+pub async fn restart_from_settings(mgr: &Arc<McpManager>, deps: McpDeps) -> Result<Value, String> {
     mgr.stop().await;
-    let cfg = read_mcp_config(&store).await?;
+    let cfg = read_mcp_config(&deps.store).await?;
     if cfg.enabled {
-        let token = ensure_token(&store, cfg.token).await;
+        let token = ensure_token(&deps.store, cfg.token).await;
         // 绑定失败直接回报前端，同时把 token 记入状态便于排查
         mgr.inner.lock().token = token.clone();
-        mgr.start(
-            store,
-            sftp,
-            exec,
-            terms,
-            cfg.port,
-            token,
-            cfg.perms,
-            cfg.rate_per_minute,
-        )
-        .await?;
+        mgr.start(deps, cfg.port, token, cfg.perms, cfg.rate_per_minute)
+            .await?;
     }
     Ok(mgr.status())
 }
@@ -469,15 +457,16 @@ pub async fn mcp_restart(
     sftp: tauri::State<'_, Arc<crate::sftp::SftpManagerState>>,
     exec: tauri::State<'_, Arc<crate::exec::ExecManagerState>>,
     terms: tauri::State<'_, Arc<crate::mcp_terminal::McpTerminalState>>,
+    ui: tauri::State<'_, Arc<crate::mcp_ui::McpUiHub>>,
 ) -> Result<Value, String> {
-    restart_from_settings(
-        &state,
-        sessions.store.clone(),
-        sftp.inner().clone(),
-        exec.inner().clone(),
-        terms.inner().clone(),
-    )
-    .await
+    let deps = McpDeps {
+        store: sessions.store.clone(),
+        sftp: sftp.inner().clone(),
+        exec: exec.inner().clone(),
+        terms: terms.inner().clone(),
+        ui: ui.inner().clone(),
+    };
+    restart_from_settings(&state, deps).await
 }
 
 /// HTTP 服务共享状态
@@ -489,6 +478,8 @@ struct ServerState {
     exec: Arc<crate::exec::ExecManagerState>,
     /// 交互式终端注册表（terminal_* 工具；stop 时 close_all 清场）
     terms: Arc<crate::mcp_terminal::McpTerminalState>,
+    /// 前端交互枢纽（危险命令审批弹窗）
+    ui: Arc<crate::mcp_ui::McpUiHub>,
     token: String,
     /// 工具分组权限（启动时快照；改设置后 mcp_restart 生效）
     perms: McpPerms,
@@ -669,7 +660,7 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "ssh_exec",
-                "description": "在已保存的 SSH 会话上执行一条 shell 命令，返回 stdout/stderr/exit code。仅 SSH 会话；本地会话会被拒绝。命令经安全策略分类：readonly 档仅只读白名单内命令放行，黑名单与无法静态判定者一律拒绝。",
+                "description": "在已保存的 SSH 会话上执行一条 shell 命令，返回 stdout/stderr/exit code。仅 SSH 会话；本地会话会被拒绝。命令经安全策略分类（档位按会话/分组/全局设置）：readonly 档仅只读白名单内命令放行；黑名单、无法静态判定、生产会话的非只读命令需用户在 mySSH 窗口确认——此时可能返回 status=pending_approval，用完全相同的参数再次调用即继续等待。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1045,14 +1036,35 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
         .await;
         return Err(format!("MCP 速率限制：{e}"));
     }
-    // 安全模型第 1/2 条：M0 全部按 readonly 档判定——只读白名单内放行；
-    // 黑名单/无法静态判定须人工确认，MCP 无确认通道（M6 落地），fail-closed 拒绝。
+    // 安全模型第 1/2 条：按会话有效档位/生产标记（会话 → 分组 → 全局）判定；
+    // 需人工确认的命令走应用内审批弹窗，窗口不可用时 fail-closed 拒绝。
     // 门在会话解析之前：被拒绝的命令不触网、不建连。
-    let deny_reason = match st.policy.classify(command, AccessLevel::Readonly, false) {
+    let rec = store.sessions().get(session_id).await.ok();
+    let eff = session_effective(st, rec.as_ref()).await;
+    let level = crate::mcp_policy::level_str(eff.level);
+    let deny_reason = match st.policy.classify(command, eff.level, eff.production) {
         Verdict::Allow => None,
-        Verdict::Deny => Some("命令超出只读白名单（当前为 readonly 档）"),
+        Verdict::Deny => Some(format!("命令超出只读白名单（当前为 {level} 档）")),
         Verdict::RequireConfirmation => {
-            Some("命令命中全局黑名单或结构无法静态判定，需人工确认（MCP 确认通道未落地）")
+            match confirm_exec(st, session_id, rec.as_ref(), command, &eff).await {
+                Confirm::Approved => None,
+                Confirm::Denied(reason) => Some(reason),
+                Confirm::Pending(id) => {
+                    mcp_audit(
+                        st,
+                        session_id,
+                        "mcp_ssh_exec",
+                        &json!({ "command": command, "result": "pending", "approvalId": id }),
+                    )
+                    .await;
+                    return serde_json::to_string_pretty(&json!({
+                        "status": "pending_approval",
+                        "approvalId": id,
+                        "message": "命令需用户在 mySSH 窗口中确认，用户尚未决定。请用完全相同的 session_id 与 command 再次调用 ssh_exec 继续等待；勿改写命令绕过确认。",
+                    }))
+                    .map_err(|e| e.to_string());
+                }
+            }
         }
     };
     if let Some(reason) = deny_reason {
@@ -1103,6 +1115,72 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
         }
         Ok(Err(e)) => Err(e),
         Err(_) => Err(format!("命令执行超时（{timeout_ms} ms），连接已断开")),
+    }
+}
+
+/// ssh_exec 单次调用内等待用户审批的时长；未决返回 pending，agent 重试续等
+const APPROVAL_WAIT: Duration = Duration::from_secs(60);
+
+/// 会话有效档位/生产标记；会话不存在时按全局档位（后续会话解析会报 NotFound）
+async fn session_effective(
+    st: &ServerState,
+    rec: Option<&core_store::SessionRecord>,
+) -> crate::mcp_policy::Effective {
+    let global = crate::mcp_policy::load_global_level(&st.store).await;
+    match rec {
+        Some(rec) => {
+            let groups = crate::mcp_policy::load_group_policies(&st.store).await;
+            crate::mcp_policy::resolve_effective(rec, &groups, global)
+        }
+        None => crate::mcp_policy::Effective {
+            level: global,
+            production: false,
+        },
+    }
+}
+
+enum Confirm {
+    Approved,
+    Denied(String),
+    Pending(String),
+}
+
+/// 需人工确认的命令：推审批弹窗并等待用户决定
+async fn confirm_exec(
+    st: &ServerState,
+    session_id: &str,
+    rec: Option<&core_store::SessionRecord>,
+    command: &str,
+    eff: &crate::mcp_policy::Effective,
+) -> Confirm {
+    // 会话不存在不弹窗：用户无从判断，且后续解析必然失败
+    let Some(rec) = rec else {
+        return Confirm::Denied("命令需人工确认，且会话不存在".into());
+    };
+    let event = json!({
+        "sessionName": rec.name,
+        "host": rec.host,
+        "user": rec.user,
+        "level": crate::mcp_policy::level_str(eff.level),
+        "production": eff.production,
+    });
+    let id = match st.ui.request(session_id, command, event) {
+        Ok(id) => id,
+        Err(e) => return Confirm::Denied(e),
+    };
+    match st.ui.wait(&id, APPROVAL_WAIT).await {
+        crate::mcp_ui::ApprovalWait::Approved => {
+            mcp_audit(
+                st,
+                session_id,
+                "mcp_ssh_exec",
+                &json!({ "command": command, "result": "approved", "approvalId": id }),
+            )
+            .await;
+            Confirm::Approved
+        }
+        crate::mcp_ui::ApprovalWait::Denied => Confirm::Denied("用户拒绝执行或审批已过期".into()),
+        crate::mcp_ui::ApprovalWait::Pending(id) => Confirm::Pending(id),
     }
 }
 
@@ -1678,6 +1756,98 @@ mod tests {
         assert!(parse_bool_setting(Some("true")));
     }
 
+    fn test_state(store: Arc<Store>, ui: Arc<crate::mcp_ui::McpUiHub>) -> ServerState {
+        ServerState {
+            store: store.clone(),
+            sftp: crate::sftp::SftpManagerState::new(store),
+            exec: crate::exec::ExecManagerState::new(tokio::runtime::Handle::current()),
+            terms: crate::mcp_terminal::McpTerminalState::new(),
+            ui,
+            token: String::new(),
+            perms: all_perms(),
+            policy: PolicyEngine::new(),
+            rate: RateLimiter::new(DEFAULT_RATE_PER_MINUTE),
+        }
+    }
+
+    /// 分组策略（生产 + standard）经 ssh_exec 生效：非只读命令弹审批，批准才放行，
+    /// 拒绝/无窗口 fail-closed；全局 readonly 的普通会话仍直接拒绝。
+    #[tokio::test]
+    async fn ssh_exec_group_policy_and_approval() {
+        let dir = std::env::temp_dir().join(format!("myssh-mcp-approval-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir.join("t.db")).await.expect("开库失败"));
+        for (id, group) in [("prod", "生产/华东"), ("dev", "开发")] {
+            let rec: core_store::SessionRecord = serde_json::from_value(json!({
+                "id": id, "name": id, "host": "127.0.0.1", "port": 1, "username": "u",
+                "authType": "password", "groupPath": group, "tags": [],
+                "createdAt": "", "updatedAt": ""
+            }))
+            .unwrap();
+            store.sessions().upsert(&rec).await.unwrap();
+        }
+        let policies = json!({ "生产": { "level": "standard", "production": true } });
+        store
+            .settings()
+            .set(
+                crate::mcp_policy::GROUP_POLICIES_KEY,
+                &serde_json::to_string(&policies).unwrap(),
+            )
+            .await
+            .unwrap();
+        let args =
+            |sid: &str| json!({ "session_id": sid, "command": "touch /tmp/x", "timeout_ms": 3000 });
+
+        // 无前端订阅：需确认的命令 fail-closed
+        let st = test_state(store.clone(), crate::mcp_ui::McpUiHub::new());
+        let e = ssh_exec_tool(&st, &args("prod")).await.unwrap_err();
+        assert!(e.contains("审批通道不可用"), "{e}");
+        // 全局 readonly 的会话：白名单外直接拒绝，不弹窗
+        let e = ssh_exec_tool(&st, &args("dev")).await.unwrap_err();
+        assert!(e.contains("readonly"), "{e}");
+
+        // 有前端订阅：收到带生产标记的审批帧，按 allow 决定
+        for allow in [false, true] {
+            let hub = crate::mcp_ui::McpUiHub::new();
+            let frames = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let fs = frames.clone();
+            hub.set_sink(Arc::new(move |v: &Value| {
+                fs.lock().push(v.clone());
+                true
+            }));
+            let h = hub.clone();
+            let fr = frames.clone();
+            let decider = tokio::spawn(async move {
+                loop {
+                    let id = fr
+                        .lock()
+                        .first()
+                        .map(|v| v["id"].as_str().unwrap().to_string());
+                    if let Some(id) = id {
+                        assert!(h.decide(&id, allow));
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+            let st = test_state(store.clone(), hub);
+            let r = ssh_exec_tool(&st, &args("prod")).await;
+            decider.await.unwrap();
+            let frame = frames.lock()[0].clone();
+            assert_eq!(frame["production"], true);
+            assert_eq!(frame["level"], "standard");
+            assert_eq!(frame["sessionName"], "prod");
+            let e = r.unwrap_err();
+            if allow {
+                // 放行后进入建连（端口 1 必然失败），不再是策略拒绝
+                assert!(!e.contains("安全策略"), "批准后不应被策略拦截: {e}");
+            } else {
+                assert!(e.contains("用户拒绝"), "{e}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ---- 轴一 1.3：MCP HTTP 面 E2E（真服务 + 真 JSON-RPC 往返） ----
 
     /// 起一台真实 MCP 服务（临时库 + 空闲端口）；调用方负责 mgr.stop()
@@ -1687,11 +1857,15 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
+        let deps = McpDeps {
+            store: store.clone(),
+            sftp: crate::sftp::SftpManagerState::new(store),
+            exec: crate::exec::ExecManagerState::new(tokio::runtime::Handle::current()),
+            terms: crate::mcp_terminal::McpTerminalState::new(),
+            ui: crate::mcp_ui::McpUiHub::new(),
+        };
         mgr.start(
-            store.clone(),
-            crate::sftp::SftpManagerState::new(store),
-            crate::exec::ExecManagerState::new(tokio::runtime::Handle::current()),
-            crate::mcp_terminal::McpTerminalState::new(),
+            deps,
             port,
             String::new(), // 测试不启用 token
             all_perms(),
@@ -1799,6 +1973,8 @@ mod tests {
             su_user: None,
             login_macro: None,
             mcp_perms: Default::default(),
+            mcp_level: None,
+            mcp_production: None,
             tags: vec![],
             command: None,
             created_at: String::new(),

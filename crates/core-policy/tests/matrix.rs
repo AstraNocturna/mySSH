@@ -48,6 +48,26 @@ fn standard_requires_confirmation_for_writes() {
 }
 
 #[test]
+fn full_allows_plain_writes_but_not_blacklist() {
+    assert_eq!(
+        eng().classify("touch /tmp/x", AccessLevel::Full, false),
+        Verdict::Allow
+    );
+    assert_eq!(
+        eng().classify("systemctl restart nginx", AccessLevel::Full, false),
+        Verdict::Allow
+    );
+    assert_eq!(
+        eng().classify("rm -rf /tmp/x", AccessLevel::Full, false),
+        Verdict::RequireConfirmation
+    );
+    assert_eq!(
+        eng().classify("env bash -c id", AccessLevel::Full, false),
+        Verdict::RequireConfirmation
+    );
+}
+
+#[test]
 fn blacklist_requires_confirmation_at_any_level() {
     for level in [
         AccessLevel::Readonly,

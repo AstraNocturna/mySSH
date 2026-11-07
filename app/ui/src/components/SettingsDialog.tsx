@@ -8,6 +8,7 @@ import { KEY_ACTIONS, keymapFromSettings, type KeymapScheme } from '../term/keym
 import { readTermBackground, readTerminalSettings } from '../state/apply-settings';
 import { Dialog } from './Dialog';
 import { ThemeStudio } from './ThemeStudio';
+import { MCP_LEVELS } from './mcp-options';
 import { useT, type MsgKey } from '../i18n';
 
 const inputCls =
@@ -612,6 +613,25 @@ export function SettingsDialog() {
                   >
                     {t('dialogs.mcpTokenRegen')}
                   </button>
+                </span>
+                <label htmlFor="set-mcp-level">{t('dialogs.mcpLevel')}</label>
+                <span className="flex flex-col gap-0.5">
+                  {/* 档位每次调用现读，无需 mcp_restart */}
+                  <select
+                    id="set-mcp-level"
+                    className={inputCls}
+                    value={
+                      typeof settings['mcp.level'] === 'string' ? settings['mcp.level'] : 'readonly'
+                    }
+                    onChange={(e) => setSetting('mcp.level', e.target.value)}
+                  >
+                    {MCP_LEVELS.map(([v, k]) => (
+                      <option key={v} value={v}>
+                        {t(k)}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-neutral-600">{t('dialogs.mcpLevelHint')}</span>
                 </span>
                 <span>{t('dialogs.mcpToolPerms')}</span>
                 <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
