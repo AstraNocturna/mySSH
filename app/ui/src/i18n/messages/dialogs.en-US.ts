@@ -164,6 +164,8 @@ export const enDialogs: Record<keyof typeof zhDialogs, string> = {
   'dialogs.mcpAllowSftpRead': 'SFTP read (list/read remote)',
   'dialogs.mcpAllowSftpWrite': 'SFTP write (write/delete remote)',
   'dialogs.mcpAllowSftpTransfer': 'SFTP upload/download (touches local files)',
+  'dialogs.mcpAllowTerminal':
+    'Interactive terminal terminal_* (bypasses command policy, off by default)',
   'dialogs.mcpHint':
     'For AI clients (e.g. Claude Code): POST http://127.0.0.1:<port>/mcp with header "Authorization: Bearer <token>". A token is generated when first enabled; listens on loopback only.',
   'dialogs.terminal': 'Terminal',

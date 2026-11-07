@@ -83,6 +83,11 @@ impl McpTerminalState {
         Arc::new(Self::default())
     }
 
+    /// terminalId → 打开它的会话档案 id（权限闸按会话覆盖判定用）
+    pub(crate) fn session_of(&self, id: &str) -> Option<String> {
+        self.terms.lock().get(id).map(|s| s.session_id.clone())
+    }
+
     /// 清场：MCP 服务停止/重启时关闭全部终端（关通道 + abort 读任务）
     pub async fn close_all(&self) {
         let all: Vec<Arc<McpTermSession>> = self.terms.lock().drain().map(|(_, s)| s).collect();

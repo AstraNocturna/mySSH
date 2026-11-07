@@ -10,11 +10,12 @@
 //! 进度用 transfer_list 轮询）。鉴权为 Bearer token
 //!（设置键 mcp.token，空 = 不鉴权；首次启用自动生成随机 token）。
 //! 工具分组权限由设置键 mcp.allow.{list_sessions,ssh_exec,sftp_read,
-//! sftp_write,sftp_transfer} 控制（terminal_* 归入 ssh_exec 组；缺省全开；
-//! tools/list 同步过滤，tools/call 命中禁用组返回 isError）。会话编辑器可逐组覆盖
+//! sftp_write,sftp_transfer,terminal} 控制（缺省全开，唯 terminal 缺省关闭：
+//! 交互字节流无法过命令分类器，开启即等于放开任意命令；tools/list 同步过滤，
+//! tools/call 命中禁用组返回 isError）。会话编辑器可逐组覆盖
 //!（sessions.mcp_perms 稀疏映射），会话级覆盖优先于全局。
 //! ssh_exec 命令经 core-policy 分类器判定（M0 readonly 档：只读白名单放行，黑名单/
-//! 无法静态判定一律拒绝——MCP 无人工确认通道；terminal_send 为交互字节流不在此列），
+//! 无法静态判定一律拒绝——MCP 无人工确认通道），
 //! 并按会话限速（设置键 mcp.rate_limit_per_minute，默认 60/分钟）；全部尝试落审计。
 //! 生命周期由 lib.rs 装配：setup 时按 mcp.enabled/mcp.port/mcp.token 启动，
 //! mcp_restart 命令供设置变更后重载。
@@ -74,6 +75,8 @@ pub struct McpPerms {
     sftp_write: bool,
     /// sftp_upload/download（触及本地文件系统，单独成组）
     sftp_transfer: bool,
+    /// terminal_*：交互字节流绕过命令分类器，单独成组且缺省关闭
+    terminal: bool,
 }
 
 impl Default for McpPerms {
@@ -84,6 +87,7 @@ impl Default for McpPerms {
             sftp_read: true,
             sftp_write: true,
             sftp_transfer: true,
+            terminal: false,
         }
     }
 }
@@ -93,10 +97,7 @@ fn tool_group_key(name: &str) -> Option<&'static str> {
     match name {
         "list_sessions" => Some("list_sessions"),
         "ssh_exec" => Some("ssh_exec"),
-        "terminal_open" => Some("ssh_exec"),
-        "terminal_send" => Some("ssh_exec"),
-        "terminal_read" => Some("ssh_exec"),
-        "terminal_close" => Some("ssh_exec"),
+        "terminal_open" | "terminal_send" | "terminal_read" | "terminal_close" => Some("terminal"),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" => Some("sftp_read"),
         "sftp_write" | "sftp_mkdir" | "sftp_delete" | "sftp_rename" | "sftp_chmod" => {
             Some("sftp_write")
@@ -115,6 +116,7 @@ impl McpPerms {
             Some("sftp_read") => self.sftp_read,
             Some("sftp_write") => self.sftp_write,
             Some("sftp_transfer") => self.sftp_transfer,
+            Some("terminal") => self.terminal,
             _ => true,
         }
     }
@@ -127,10 +129,19 @@ async fn tool_allowed(st: &ServerState, name: &str, args: &Value) -> bool {
     let Some(key) = tool_group_key(name) else {
         return global;
     };
-    let Some(sid) = args.get("session_id").and_then(Value::as_str) else {
-        return global;
+    // terminal_send/read/close 只带 terminalId：按打开时的会话取覆盖，否则会话级 deny 失效
+    let sid = match args.get("session_id").and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => match args
+            .get("terminalId")
+            .and_then(Value::as_str)
+            .and_then(|id| st.terms.session_of(id))
+        {
+            Some(s) => s,
+            None => return global,
+        },
     };
-    match st.store.sessions().get(sid).await {
+    match st.store.sessions().get(&sid).await {
         Ok(rec) => rec.mcp_perms.get(key).copied().unwrap_or(global),
         Err(_) => global,
     }
@@ -211,6 +222,8 @@ async fn read_mcp_config(store: &Store) -> Result<McpConfig, String> {
         sftp_read: parse_allow_setting(get("mcp.allow.sftp_read").await?.as_deref()),
         sftp_write: parse_allow_setting(get("mcp.allow.sftp_write").await?.as_deref()),
         sftp_transfer: parse_allow_setting(get("mcp.allow.sftp_transfer").await?.as_deref()),
+        // 缺省关闭：未显式开启的旧库升级后 terminal_* 不可用
+        terminal: parse_bool_setting(get("mcp.allow.terminal").await?.as_deref()),
     };
     let rate_per_minute = parse_rate_setting(get("mcp.rate_limit_per_minute").await?.as_deref());
     Ok(McpConfig {
@@ -1390,8 +1403,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn perms_default_allows_everything() {
+    fn perms_default_allows_everything_but_terminal() {
         let p = McpPerms::default();
+        for name in [
+            "terminal_open",
+            "terminal_send",
+            "terminal_read",
+            "terminal_close",
+        ] {
+            assert!(!p.allows(name), "terminal 组缺省应关闭：{name}");
+        }
         for name in [
             "list_sessions",
             "ssh_exec",
@@ -1407,10 +1428,6 @@ mod tests {
             "sftp_upload",
             "sftp_download",
             "sftp_transfer_list",
-            "terminal_open",
-            "terminal_send",
-            "terminal_read",
-            "terminal_close",
         ] {
             assert!(p.allows(name), "默认应放行 {name}");
         }
@@ -1424,6 +1441,7 @@ mod tests {
             sftp_read: false,
             sftp_write: false,
             sftp_transfer: false,
+            terminal: true,
         };
         assert!(!p.allows("list_sessions"));
         assert!(!p.allows("ssh_exec"));
@@ -1433,7 +1451,14 @@ mod tests {
         assert!(!p.allows("sftp_upload"));
         assert!(!p.allows("sftp_download"));
         assert!(!p.allows("sftp_transfer_list"));
-        // terminal_* 归入 ssh_exec 组
+        // terminal_* 独立成组：ssh_exec 关闭不影响，terminal 开关单独控制
+        assert!(p.allows("terminal_open"));
+        assert!(p.allows("terminal_send"));
+        let p = McpPerms {
+            terminal: false,
+            ..McpPerms::default()
+        };
+        assert!(p.allows("ssh_exec"));
         assert!(!p.allows("terminal_open"));
         assert!(!p.allows("terminal_send"));
         assert!(!p.allows("terminal_read"));
@@ -1463,7 +1488,8 @@ mod tests {
                 .filter_map(|t| t["name"].as_str())
                 .collect()
         }
-        let all = tools_list(&McpPerms::default());
+        assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 14);
+        let all = tools_list(&all_perms());
         let names = names_of(&all);
         assert_eq!(names.len(), 18);
         assert!(names.contains(&"sftp_upload"));
@@ -1476,7 +1502,8 @@ mod tests {
         let p = McpPerms {
             ssh_exec: false,
             sftp_transfer: false,
-            ..McpPerms::default()
+            terminal: false,
+            ..all_perms()
         };
         let filtered = tools_list(&p);
         let names = names_of(&filtered);
@@ -1484,7 +1511,6 @@ mod tests {
         assert!(!names.contains(&"sftp_upload"));
         assert!(!names.contains(&"sftp_download"));
         assert!(!names.contains(&"sftp_transfer_list"));
-        // terminal_* 随 ssh_exec 组一起被过滤
         assert!(!names.contains(&"terminal_open"));
         assert!(!names.contains(&"terminal_send"));
         assert!(!names.contains(&"terminal_read"));
@@ -1547,6 +1573,19 @@ mod tests {
         assert_eq!(parse_rate_setting(Some("99999")), DEFAULT_RATE_PER_MINUTE);
     }
 
+    fn all_perms() -> McpPerms {
+        McpPerms {
+            terminal: true,
+            ..McpPerms::default()
+        }
+    }
+
+    #[test]
+    fn terminal_setting_absent_means_deny() {
+        assert!(!parse_bool_setting(None));
+        assert!(parse_bool_setting(Some("true")));
+    }
+
     // ---- 轴一 1.3：MCP HTTP 面 E2E（真服务 + 真 JSON-RPC 往返） ----
 
     /// 起一台真实 MCP 服务（临时库 + 空闲端口）；调用方负责 mgr.stop()
@@ -1563,7 +1602,7 @@ mod tests {
             crate::mcp_terminal::McpTerminalState::new(),
             port,
             String::new(), // 测试不启用 token
-            McpPerms::default(),
+            all_perms(),
             DEFAULT_RATE_PER_MINUTE,
         )
         .await
