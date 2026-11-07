@@ -31,6 +31,8 @@ const TERM_BUF_CAP: usize = 1024 * 1024;
 const READ_POLL: Duration = Duration::from_millis(500);
 /// terminal_read 单次 wait 上限（秒；与 sftp_upload/download 的 wait_seconds 一致）
 const READ_WAIT_MAX: u64 = 600;
+/// terminal_read 单次默认返回的原始字节数（max_bytes 上限为整个缓冲）
+const READ_DEFAULT_BYTES: usize = 64 * 1024;
 /// terminal_open 建连 + 开 PTY 的超时（对齐 ssh_exec 默认预算）
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -64,6 +66,39 @@ impl TermBuf {
     }
 }
 
+/// 一页读取结果（游标模型共用：terminal_read / job_read）
+pub(crate) struct Page {
+    pub(crate) data: String,
+    pub(crate) next: u64,
+    pub(crate) more: bool,
+    pub(crate) truncated: bool,
+}
+
+/// 从 offset 起读至多 max 原始字节。锁内只拷贝，剥离在锁外做，不阻塞输出泵
+pub(crate) fn read_page(shared: &Mutex<TermBuf>, offset: u64, max: usize, strip: bool) -> Page {
+    let (raw, from, at_end, total, start) = {
+        let b = shared.lock();
+        let start = b.start();
+        let from = offset.max(start);
+        let skip = (from - start) as usize;
+        let avail = (b.total - from) as usize;
+        let take = avail.min(max);
+        let raw: Vec<u8> = b.buf.range(skip..skip + take).copied().collect();
+        (raw, from, b.closed && take == avail, b.total, start)
+    };
+    let (data, used) = if strip {
+        crate::mcp_text::strip_ansi_page(&raw, at_end)
+    } else {
+        (String::from_utf8_lossy(&raw).into_owned(), raw.len())
+    };
+    let next = from + used as u64;
+    Page {
+        data,
+        next,
+        more: next < total,
+        truncated: offset < start,
+    }
+}
 /// 终端的 I/O 承载
 enum TermIo {
     /// 无界面：独立 Bulk 连接 + PTY（无 UI 订阅或 agent 显式要求 headless）
@@ -418,9 +453,10 @@ async fn terminal_send(ctx: &TermCtx<'_>, args: &Value) -> Result<String, String
     Ok(json!({ "ok": true }).to_string())
 }
 
-/// terminal_read：offset 游标轮询。wait_seconds>0 时服务端长轮询到有新输出/
-/// 终端关闭/等待到期（上限 600s），不往模型上下文塞空轮询。旧 offset 因
-/// 环形丢弃失效时 truncated=true 并从最早可用处返回。
+/// terminal_read：offset 游标轮询。wait_seconds>0 时服务端长轮询到就绪/终端关闭/
+/// 等待到期（上限 600s），不往模型上下文塞空轮询。就绪默认 = 有新输出；给了
+/// wait_for（正则，匹配剥离 ANSI 后的新输出）或 idle_ms（输出静默时长）则按其判定，
+/// 二者任一满足即返回。旧 offset 因环形丢弃失效时 truncated=true 并从最早可用处返回。
 async fn terminal_read(terms: &Arc<McpTerminalState>, args: &Value) -> Result<String, String> {
     let id = req_term_id(args, "terminal_read")?;
     let offset = args
@@ -432,30 +468,75 @@ async fn terminal_read(terms: &Arc<McpTerminalState>, args: &Value) -> Result<St
         .and_then(Value::as_u64)
         .unwrap_or(0)
         .min(READ_WAIT_MAX);
+    let max = args
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .map_or(READ_DEFAULT_BYTES, |v| {
+            usize::try_from(v).unwrap_or(TERM_BUF_CAP)
+        })
+        .clamp(1, TERM_BUF_CAP);
+    let strip = args
+        .get("strip_ansi")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let wait_for = args
+        .get("wait_for")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            regex::RegexBuilder::new(p)
+                .size_limit(1 << 20)
+                .build()
+                .map_err(|e| format!("wait_for 不是合法正则: {e}"))
+        })
+        .transpose()?;
+    let idle = args
+        .get("idle_ms")
+        .and_then(Value::as_u64)
+        .filter(|&ms| ms > 0)
+        .map(|ms| Duration::from_millis(ms.min(READ_WAIT_MAX * 1000)));
     let sess = terms.get(id)?;
     let deadline = Instant::now() + Duration::from_secs(wait);
+    let mut seen = offset;
+    let mut changed_at = Instant::now();
+    let mut matched = false;
     loop {
-        {
+        let (total, closed) = {
             let b = sess.shared.lock();
-            // 有新输出（含 offset 已失效）、终端关闭或等待到期 → 返回当前快照
-            if offset < b.total || b.closed || Instant::now() >= deadline {
-                let start = b.start();
-                let from = offset.max(start);
-                let skip = (from - start) as usize;
-                let data: Vec<u8> = b.buf.iter().skip(skip).copied().collect();
-                return Ok(json!({
-                    "data": String::from_utf8_lossy(&data),
-                    "nextOffset": from + data.len() as u64,
-                    "closed": b.closed,
-                    "truncated": b.truncated && offset < start,
-                })
-                .to_string());
+            (b.total, b.closed)
+        };
+        let now = Instant::now();
+        if total != seen {
+            seen = total;
+            changed_at = now;
+            if let Some(re) = &wait_for {
+                let all = read_page(&sess.shared, offset, TERM_BUF_CAP, true);
+                matched = re.is_match(&all.data);
             }
+        }
+        let ready = offset < total
+            && if wait_for.is_none() && idle.is_none() {
+                true
+            } else {
+                matched || idle.is_some_and(|d| now.duration_since(changed_at) >= d)
+            };
+        if ready || closed || now >= deadline {
+            let page = read_page(&sess.shared, offset, max, strip);
+            let mut v = json!({
+                "data": page.data,
+                "nextOffset": page.next,
+                "more": page.more,
+                "closed": closed,
+                "truncated": page.truncated,
+            });
+            if wait_for.is_some() {
+                v["matched"] = json!(matched);
+            }
+            return Ok(v.to_string());
         }
         tokio::time::sleep(READ_POLL).await;
     }
 }
-
 /// terminal_close：移出注册表 → 释放（落审计）。UI 承载的标签只收回控制，不关标签
 async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, String> {
     let id = req_term_id(args, "terminal_close")?;
@@ -577,6 +658,7 @@ async fn audit(store: &Arc<Store>, session_id: &str, action: &str, detail: &Valu
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
@@ -638,5 +720,64 @@ mod tests {
         // MCP 停止：收回剩余 UI 标签并上报，供前端摘标记
         assert_eq!(st.close_all().await, vec!["tabB".to_string()]);
         assert!(tap_b.is_closed());
+    }
+
+    #[tokio::test]
+    async fn read_waits_for_prompt_and_strips_ansi() {
+        let st = McpTerminalState::new();
+        let tap = Arc::new(crate::terminal::AgentTap::new());
+        let id = st.insert_ui("tab", tap.clone(), None, UiKind::Agent);
+        tap.out.lock().append(b"ls\r\n");
+        let out = tap.out.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            out.lock().append(b"\x1b[32mfile\x1b[0m\r\nuser@h:~$ ");
+        });
+        let args = json!({ "terminalId": id, "offset": 0, "wait_seconds": 5, "wait_for": "\\$ $" });
+        let v: Value = serde_json::from_str(&terminal_read(&st, &args).await.unwrap()).unwrap();
+        assert_eq!(v["matched"], true, "{v}");
+        assert_eq!(v["data"], "ls\nfile\nuser@h:~$ ");
+        assert_eq!(v["more"], false);
+
+        // 未匹配：等到期返回 matched=false，数据照常给出
+        let next = v["nextOffset"].as_u64().unwrap();
+        tap.out.lock().append(b"still running");
+        let args =
+            json!({ "terminalId": id, "offset": next, "wait_seconds": 1, "wait_for": "DONE" });
+        let v: Value = serde_json::from_str(&terminal_read(&st, &args).await.unwrap()).unwrap();
+        assert_eq!(v["matched"], false);
+        assert_eq!(v["data"], "still running");
+
+        let bad = json!({ "terminalId": id, "offset": 0, "wait_for": "(" });
+        assert!(terminal_read(&st, &bad).await.is_err(), "非法正则应报错");
+    }
+
+    #[tokio::test]
+    async fn read_idle_and_paging() {
+        let st = McpTerminalState::new();
+        let tap = Arc::new(crate::terminal::AgentTap::new());
+        let id = st.insert_ui("tab", tap.clone(), None, UiKind::Agent);
+        let out = tap.out.clone();
+        tokio::spawn(async move {
+            for i in 0..3 {
+                out.lock().append(format!("line{i}\n").as_bytes());
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+        let t0 = Instant::now();
+        let args = json!({ "terminalId": id, "offset": 0, "wait_seconds": 10, "idle_ms": 1000 });
+        let v: Value = serde_json::from_str(&terminal_read(&st, &args).await.unwrap()).unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(1000),
+            "静默期未到不应返回"
+        );
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        assert_eq!(v["data"], "line0\nline1\nline2\n");
+
+        let args = json!({ "terminalId": id, "offset": 0, "max_bytes": 6 });
+        let v: Value = serde_json::from_str(&terminal_read(&st, &args).await.unwrap()).unwrap();
+        assert_eq!(v["data"], "line0\n");
+        assert_eq!(v["nextOffset"], 6);
+        assert_eq!(v["more"], true);
     }
 }

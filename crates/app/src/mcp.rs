@@ -46,7 +46,7 @@ const DEFAULT_PORT: u16 = 17345;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// ssh_exec 超时上限
 const MAX_TIMEOUT_MS: u64 = 120_000;
-/// stdout/stderr 各自的截断上限
+/// stdout/stderr 各自的截断上限（超限保留头尾各一半）
 const OUTPUT_CAP: usize = 64 * 1024;
 /// 每会话每分钟 ssh_exec 命令数默认上限（设置键 mcp.rate_limit_per_minute）
 const DEFAULT_RATE_PER_MINUTE: u32 = 60;
@@ -729,7 +729,7 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "ssh_exec",
-                "description": "在已保存的 SSH 会话上执行一条 shell 命令，返回 stdout/stderr/exit code。仅 SSH 会话；本地会话会被拒绝。命令经安全策略分类（档位按会话/分组/全局设置）：readonly 档仅只读白名单内命令放行；黑名单、无法静态判定、生产会话的非只读命令需用户在 mySSH 窗口确认——此时可能返回 status=pending_approval，用完全相同的参数再次调用即继续等待。",
+                "description": "在已保存的 SSH 会话上执行一条 shell 命令，返回 stdout/stderr/exit code。stdout/stderr 各上限 64KiB，超出时保留头尾各一半、中间省略（truncated=true，omittedBytes 为省略字节数）；长时间运行的命令改用 job_start。仅 SSH 会话；本地会话会被拒绝。命令经安全策略分类（档位按会话/分组/全局设置）：readonly 档仅只读白名单内命令放行；黑名单、无法静态判定、生产会话的非只读命令需用户在 mySSH 窗口确认——此时可能返回 status=pending_approval，用完全相同的参数再次调用即继续等待。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -747,6 +747,11 @@ fn tools_list(perms: &McpPerms) -> Value {
                             "minimum": 1,
                             "maximum": 120000,
                             "default": 30000
+                        },
+                        "strip_ansi": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "剥离 ANSI 控制序列、折叠 CRLF 与进度条刷新；需要原始字节时置 false"
                         }
                     },
                     "required": ["session_id", "command"],
@@ -835,13 +840,17 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "terminal_read",
-                "description": "读取终端输出。offset 游标模型：返回 offset 之后的输出与 nextOffset（下次传入继续读；首次传 0）。输出缓冲为 1MiB 环形，超界丢最旧；offset 早于可用起点时 truncated=true 并从最早可用处返回。wait_seconds>0 时服务端长轮询（最长 600s）直到有新输出或终端关闭。",
+                "description": "读取终端输出。offset 游标模型：返回 offset 之后的输出与 nextOffset（下次传入继续读；首次传 0）。输出缓冲为 1MiB 环形，超界丢最旧；offset 早于可用起点时 truncated=true 并从最早可用处返回。wait_seconds>0 时服务端长轮询（最长 600s）直到就绪或终端关闭：默认有新输出即返回；给 wait_for（正则，匹配剥离 ANSI 后的新输出，如提示符 `\\$ $`）则等到匹配（返回 matched），给 idle_ms 则等到输出静默该时长——用于判定命令执行完毕，避免反复轮询。默认剥离 ANSI 控制序列；单次最多返回 max_bytes（默认 64KiB），more=true 表示还有未读输出。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "terminalId": { "type": "string" },
                         "offset": { "type": "integer", "minimum": 0, "description": "上次返回的 nextOffset；首次传 0" },
-                        "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 600, "default": 0 }
+                        "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 600, "default": 0 },
+                        "wait_for": { "type": "string", "description": "就绪判定正则（Rust regex 语法，匹配 offset 之后剥离 ANSI 的输出）" },
+                        "idle_ms": { "type": "integer", "minimum": 1, "description": "有新输出后静默该毫秒数即视为就绪（粒度约 0.5s）" },
+                        "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536, "description": "本次最多读取的原始字节数" },
+                        "strip_ansi": { "type": "boolean", "default": true, "description": "剥离 ANSI/OSC 控制序列（全屏程序如 vim/top 需原始字节时置 false）" }
                     },
                     "required": ["terminalId", "offset"],
                     "additionalProperties": false
@@ -1278,6 +1287,10 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_TIMEOUT_MS)
         .clamp(1, MAX_TIMEOUT_MS);
+    let strip = args
+        .get("strip_ansi")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
     if let Gate::Pending(resp) = exec_gate(st, session_id, command, "ssh_exec").await? {
         return Ok(resp);
@@ -1293,7 +1306,7 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
     let run = async {
         let ctx = crate::exec::ensure_exec_ctx(&st.exec, store, session_id).await?;
         let _permit = ctx.acquire_mcp().await?;
-        ssh_exec_inner(ctx, command.to_string()).await
+        ssh_exec_inner(ctx, command.to_string(), strip).await
     };
     let result = tokio::time::timeout(Duration::from_millis(timeout_ms), run).await;
     let elapsed = started.elapsed().as_millis() as u64;
@@ -1505,7 +1518,11 @@ async fn confirm_exec(
 }
 
 /// 建连 + exec + 输出收集（被外层 timeout 包裹；超时 drop 即断连）
-async fn ssh_exec_inner(ctx: Arc<crate::exec::ExecCtx>, command: String) -> Result<Value, String> {
+async fn ssh_exec_inner(
+    ctx: Arc<crate::exec::ExecCtx>,
+    command: String,
+    strip: bool,
+) -> Result<Value, String> {
     // Exec Transport 复用连接（PR-14）：建连/host-key/KI 策略由 exec 组工厂统一承载；
     // 超时 drop 只弃本 channel，共享 Transport 存活
     let conn = ctx.conn_handle();
@@ -1517,16 +1534,13 @@ async fn ssh_exec_inner(ctx: Arc<crate::exec::ExecCtx>, command: String) -> Resu
         .await
         .map_err(|e| format!("exec 通道请求失败: {e}"))?;
 
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut truncated = false;
+    let mut stdout = crate::mcp_text::HeadTail::new(OUTPUT_CAP);
+    let mut stderr = crate::mcp_text::HeadTail::new(OUTPUT_CAP);
     let mut exit_status: Option<u32> = None;
     while let Some(msg) = ch.wait().await {
         match msg {
-            russh::ChannelMsg::Data { data } => push_capped(&mut stdout, &data, &mut truncated),
-            russh::ChannelMsg::ExtendedData { data, .. } => {
-                push_capped(&mut stderr, &data, &mut truncated);
-            }
+            russh::ChannelMsg::Data { data } => stdout.push(&data),
+            russh::ChannelMsg::ExtendedData { data, .. } => stderr.push(&data),
             russh::ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
             russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
             _ => {}
@@ -1534,25 +1548,18 @@ async fn ssh_exec_inner(ctx: Arc<crate::exec::ExecCtx>, command: String) -> Resu
     }
     drop(conn);
 
-    Ok(json!({
+    let omitted = stdout.omitted() + stderr.omitted();
+    let mut body = json!({
         "exitCode": exit_status,
-        "stdout": String::from_utf8_lossy(&stdout),
-        "stderr": String::from_utf8_lossy(&stderr),
-        "truncated": truncated,
-    }))
-}
-
-/// 追加到缓冲，超过 OUTPUT_CAP 的部分丢弃并置截断标记
-fn push_capped(buf: &mut Vec<u8>, data: &[u8], truncated: &mut bool) {
-    let room = OUTPUT_CAP.saturating_sub(buf.len());
-    if room >= data.len() {
-        buf.extend_from_slice(data);
-    } else {
-        buf.extend_from_slice(&data[..room]);
-        *truncated = true;
+        "stdout": stdout.render(strip),
+        "stderr": stderr.render(strip),
+        "truncated": omitted > 0,
+    });
+    if omitted > 0 {
+        body["omittedBytes"] = json!(omitted);
     }
+    Ok(body)
 }
-
 // ---------- SFTP 工具族 ----------
 /// sftp_read 默认/最大返回字节；sftp_write 内容上限（字节要进模型上下文，必须有界）
 const SFTP_READ_DEFAULT_CAP: u64 = 256 * 1024;
