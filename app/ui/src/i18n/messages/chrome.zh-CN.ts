@@ -128,6 +128,7 @@ export const zhChrome = {
   'chrome.menuEdit': '编辑',
   'chrome.menuRename': '重命名…',
   'chrome.menuDuplicate': '复制服务器',
+  'chrome.menuAiBackups': 'AI 文件改动…',
   'chrome.menuFavorite': '添加收藏',
   'chrome.menuUnfavorite': '取消收藏',
   'chrome.menuDelete': '删除',

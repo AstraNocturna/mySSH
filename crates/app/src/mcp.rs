@@ -113,10 +113,10 @@ fn tool_group_key(name: &str) -> Option<&'static str> {
         "ssh_exec" => Some("ssh_exec"),
         "terminal_open" | "terminal_send" | "terminal_read" | "terminal_close"
         | "terminal_list" => Some("terminal"),
-        "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" => Some("sftp_read"),
-        "sftp_write" | "sftp_mkdir" | "sftp_delete" | "sftp_rename" | "sftp_chmod" => {
-            Some("sftp_write")
-        }
+        "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "file_view" | "file_grep"
+        | "file_glob" | "file_backups" => Some("sftp_read"),
+        "sftp_write" | "sftp_mkdir" | "sftp_delete" | "sftp_rename" | "sftp_chmod"
+        | "file_edit" | "file_rollback" => Some("sftp_write"),
         "sftp_upload" | "sftp_download" | "sftp_transfer_list" => Some("sftp_transfer"),
         _ => None,
     }
@@ -309,6 +309,8 @@ pub struct McpDeps {
     pub ui: Arc<crate::mcp_ui::McpUiHub>,
     /// UI 终端管理器（agent 终端以标签打开 / 用户共享标签）
     pub term_mgr: Arc<crate::terminal::TerminalManager>,
+    /// AI 文件改动备份（回滚用）
+    pub backups: Arc<crate::mcp_files::BackupStore>,
 }
 
 /// MCP 服务生命周期管理：持有 tokio task + shutdown watch
@@ -351,6 +353,7 @@ impl McpManager {
             terms,
             ui,
             term_mgr,
+            backups,
         } = deps;
         let state = Arc::new(ServerState {
             store,
@@ -359,6 +362,7 @@ impl McpManager {
             terms: terms.clone(),
             ui: ui.clone(),
             term_mgr,
+            backups,
             token: token.clone(),
             perms,
             // 安全模型执行面（M0 只读档）：判定管线 + 每会话速率闸，随服务同生命周期
@@ -488,6 +492,7 @@ pub async fn mcp_status(state: tauri::State<'_, Arc<McpManager>>) -> Result<Valu
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn mcp_restart(
     state: tauri::State<'_, Arc<McpManager>>,
     sessions: tauri::State<'_, Arc<crate::sessions::SessionManagerState>>,
@@ -496,6 +501,7 @@ pub async fn mcp_restart(
     terms: tauri::State<'_, Arc<crate::mcp_terminal::McpTerminalState>>,
     ui: tauri::State<'_, Arc<crate::mcp_ui::McpUiHub>>,
     term_mgr: tauri::State<'_, Arc<crate::terminal::TerminalManager>>,
+    backups: tauri::State<'_, Arc<crate::mcp_files::BackupStore>>,
 ) -> Result<Value, String> {
     let deps = McpDeps {
         store: sessions.store.clone(),
@@ -504,6 +510,7 @@ pub async fn mcp_restart(
         terms: terms.inner().clone(),
         ui: ui.inner().clone(),
         term_mgr: term_mgr.inner().clone(),
+        backups: backups.inner().clone(),
     };
     restart_from_settings(&state, deps).await
 }
@@ -520,6 +527,8 @@ struct ServerState {
     /// 前端交互枢纽（危险命令审批弹窗、agent 终端开标签）
     ui: Arc<crate::mcp_ui::McpUiHub>,
     term_mgr: Arc<crate::terminal::TerminalManager>,
+    /// AI 文件改动备份（file_edit / sftp_write / sftp_delete 前落盘，file_rollback 恢复）
+    backups: Arc<crate::mcp_files::BackupStore>,
     token: String,
     /// 工具分组权限（启动时快照；改设置后 mcp_restart 生效）
     perms: McpPerms,
@@ -834,7 +843,7 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "sftp_write",
-                "description": "覆盖写远端文件（不存在则创建；内容上限 1MiB）。注意：会整体替换文件内容。",
+                "description": "覆盖写远端文件（不存在则创建；内容上限 1MiB）。注意：会整体替换文件内容；局部修改优先用 file_edit。原内容自动备份（返回 backupId，可 file_rollback）。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -861,7 +870,7 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "sftp_delete",
-                "description": "删除远端文件/目录；目录需 recursive=true 才递归删除",
+                "description": "删除远端文件/目录；目录需 recursive=true 才递归删除。删除文件前自动备份（返回 backupId，可 file_rollback）；目录删除不备份",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -942,6 +951,98 @@ fn tools_list(perms: &McpPerms) -> Value {
                     "required": ["session_id"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "file_view",
+                "description": "按行查看远端文本文件（带行号，默认 400 行、最多 2000 行；超长行截断）。返回 etag，可传给 file_edit 防止覆盖他人并发改动。文件上限 8MiB",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "path": { "type": "string" },
+                        "offset": { "type": "integer", "minimum": 1, "default": 1, "description": "起始行（1 起）" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 400 }
+                    },
+                    "required": ["session_id", "path"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "file_edit",
+                "description": "精确字符串替换编辑远端文件：old_str 须与文件内容逐字一致且唯一（否则报错，可加上下文或 replace_all=true）。old_str 为空且文件不存在 = 新建。改前自动备份（返回 backupId，可 file_rollback）",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "path": { "type": "string" },
+                        "old_str": { "type": "string" },
+                        "new_str": { "type": "string" },
+                        "replace_all": { "type": "boolean", "default": false },
+                        "expected_etag": { "type": "string", "description": "file_view 返回的 etag；文件已变化则拒绝" }
+                    },
+                    "required": ["session_id", "path", "old_str", "new_str"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "file_grep",
+                "description": "在远端文件/目录中按正则搜索（经 SFTP 遍历，不执行远端命令），输出 path:行号:内容。跳过二进制、>2MiB 文件与 .git/node_modules；遍历最多 20000 项 / 20s",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "path": { "type": "string", "description": "文件或目录" },
+                        "pattern": { "type": "string", "description": "正则（Rust regex 语法）" },
+                        "glob": { "type": "string", "description": "文件过滤，如 *.conf 或 **/*.{yml,yaml}" },
+                        "case_insensitive": { "type": "boolean", "default": false },
+                        "files_only": { "type": "boolean", "default": false, "description": "只列出含匹配的文件" },
+                        "max_results": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
+                    },
+                    "required": ["session_id", "path", "pattern"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "file_glob",
+                "description": "按 glob 查找远端文件（** 跨目录，* ? 不跨 /，{a,b} 选择；不含 / 的模式按文件名匹配）。输出 路径<TAB>大小",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "path": { "type": "string", "description": "起始目录" },
+                        "pattern": { "type": "string" },
+                        "max_results": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 200 }
+                    },
+                    "required": ["session_id", "path", "pattern"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "file_backups",
+                "description": "列出该会话的 AI 文件改动备份（新→旧）：id/路径/触发工具/改前是否存在/时间",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "file_rollback",
+                "description": "把文件恢复到某条备份的改前状态（改前不存在则删除）。若该文件在那次改动后又被修改过，默认拒绝，force=true 才覆盖。回滚前的内容也会备份",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "backup_id": { "type": "string" },
+                        "force": { "type": "boolean", "default": false }
+                    },
+                    "required": ["session_id", "backup_id"],
+                    "additionalProperties": false
+                }
             }
         ]
     });
@@ -973,7 +1074,9 @@ fn tool_annotations(name: &str) -> Value {
         "list_sessions" => (true, false, true, false),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "sftp_transfer_list"
         | "terminal_read" => (true, false, true, true),
-        "terminal_list" => (true, false, true, false),
+        "terminal_list" | "file_backups" => (true, false, true, false),
+        "file_view" | "file_grep" | "file_glob" => (true, false, true, true),
+        "file_edit" | "file_rollback" => (false, true, false, true),
         "ssh_exec" | "terminal_send" => (false, true, false, true),
         "terminal_open" | "terminal_close" | "sftp_mkdir" => (false, false, false, true),
         "sftp_write" | "sftp_delete" | "sftp_chmod" | "sftp_upload" | "sftp_download" => {
@@ -1029,6 +1132,24 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
             match crate::mcp_terminal::terminal_tool(&ctx, n, args).await {
                 Ok(text) => ok_content(text),
                 Err(e) => err_content(e),
+            }
+        }
+        // 远程文件工具族（view/edit/grep/glob + 备份回滚；实现见 mcp_files.rs）
+        n if n.starts_with("file_") => {
+            let ctx = crate::mcp_files::FileCtx {
+                store: &st.store,
+                sftp: &st.sftp,
+                backups: &st.backups,
+            };
+            match tokio::time::timeout(
+                FILE_TOOL_TIMEOUT,
+                crate::mcp_files::file_tool(&ctx, n, args),
+            )
+            .await
+            {
+                Ok(Ok(text)) => ok_content(text),
+                Ok(Err(e)) => err_content(e),
+                Err(_) => err_content(format!("文件操作超时（{}s）", FILE_TOOL_TIMEOUT.as_secs())),
             }
         }
         // SFTP 工具族：30s 超时兜底，错误走 isError 内容
@@ -1292,6 +1413,8 @@ const SFTP_READ_DEFAULT_CAP: u64 = 256 * 1024;
 const SFTP_IO_MAX: u64 = 1024 * 1024;
 /// 单操作超时（浏览/元操作/小文件读写；上传/下载入队即返回，wait_seconds 另加预算）
 const SFTP_OP_TIMEOUT: Duration = Duration::from_secs(30);
+/// file_* 工具超时（grep/glob 遍历自带 20s 预算，余量给读文件与写回）
+const FILE_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 解析 session_id 并取/建 SFTP 上下文（ensure_ctx 内含 KI 拒绝与连接复用）
 async fn sftp_ctx(
@@ -1313,6 +1436,13 @@ fn req_str<'a>(args: &'a Value, key: &str, tool: &str) -> Result<&'a str, String
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("{tool} 缺少参数 {key}"))
+}
+
+/// 把 extra 的字段并入 out（两者均为对象时）
+fn merge_json(out: &mut Value, extra: Value) {
+    if let (Some(o), Value::Object(e)) = (out.as_object_mut(), extra) {
+        o.extend(e);
+    }
 }
 
 /// MCP 侧写操作审计（Actor::Mcp，与 UI 的 Actor::Gui 区分来源）
@@ -1402,17 +1532,33 @@ async fn sftp_tool_inner(st: &ServerState, name: &str, args: &Value) -> Result<S
                     SFTP_IO_MAX
                 ));
             }
+            let backup = crate::mcp_files::backup_existing(
+                &ctx,
+                &st.backups,
+                &sid,
+                path,
+                name,
+                Some(content.as_bytes()),
+            )
+            .await;
             let p = path.to_string();
             let bytes = content.as_bytes();
-            crate::sftp::meta(&ctx, move |c| async move { c.overwrite(&p, bytes).await }).await?;
+            if let Err(e) =
+                crate::sftp::meta(&ctx, move |c| async move { c.overwrite(&p, bytes).await }).await
+            {
+                backup.discard(&st.backups).await;
+                return Err(e);
+            }
             mcp_audit(
                 st,
                 &sid,
                 "mcp_sftp_write",
-                &json!({ "path": path, "bytes": content.len() }),
+                &json!({ "path": path, "bytes": content.len(), "backupId": backup.id() }),
             )
             .await;
-            Ok(json!({ "path": path, "bytes": content.len() }).to_string())
+            let mut out = json!({ "path": path, "bytes": content.len() });
+            merge_json(&mut out, backup.to_json());
+            Ok(out.to_string())
         }
         "sftp_mkdir" => {
             let (sid, ctx) = sftp_ctx(st, args, name).await?;
@@ -1449,7 +1595,33 @@ async fn sftp_tool_inner(st: &ServerState, name: &str, args: &Value) -> Result<S
                     }
                 }
                 _ => {
-                    crate::sftp::meta(&ctx, move |c| async move { c.remove_file(&p).await }).await?
+                    // 文件删除前备份（目录删除不备份：体量不可控）
+                    let backup = crate::mcp_files::backup_existing(
+                        &ctx,
+                        &st.backups,
+                        &sid,
+                        path,
+                        name,
+                        None,
+                    )
+                    .await;
+                    if let Err(e) =
+                        crate::sftp::meta(&ctx, move |c| async move { c.remove_file(&p).await })
+                            .await
+                    {
+                        backup.discard(&st.backups).await;
+                        return Err(e);
+                    }
+                    mcp_audit(
+                        st,
+                        &sid,
+                        "mcp_sftp_delete",
+                        &json!({ "path": path, "recursive": false, "backupId": backup.id() }),
+                    )
+                    .await;
+                    let mut out = json!({ "ok": true, "path": path });
+                    merge_json(&mut out, backup.to_json());
+                    return Ok(out.to_string());
                 }
             }
             mcp_audit(
@@ -1686,10 +1858,18 @@ mod tests {
                 .filter_map(|t| t["name"].as_str())
                 .collect()
         }
-        assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 14);
+        assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 20);
         let all = tools_list(&all_perms());
         let names = names_of(&all);
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 25);
+        // file_* 跟随 sftp_read / sftp_write 权限组
+        let ro = McpPerms {
+            sftp_write: false,
+            ..all_perms()
+        };
+        let ro_names = names_of(&tools_list(&ro)).join(",");
+        assert!(ro_names.contains("file_view") && ro_names.contains("file_grep"));
+        assert!(!ro_names.contains("file_edit") && !ro_names.contains("file_rollback"));
         assert!(names.contains(&"terminal_list"));
         assert!(names.contains(&"sftp_upload"));
         assert!(names.contains(&"sftp_download"));
@@ -1714,7 +1894,7 @@ mod tests {
         assert!(!names.contains(&"terminal_send"));
         assert!(!names.contains(&"terminal_read"));
         assert!(!names.contains(&"terminal_close"));
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 16);
     }
 
     /// 策略门 E2E：拒绝路径不触网（门在会话解析之前），临时库即可
@@ -1818,6 +1998,9 @@ mod tests {
             terms: crate::mcp_terminal::McpTerminalState::new(),
             ui,
             term_mgr: Arc::new(crate::terminal::TerminalManager::default()),
+            backups: crate::mcp_files::BackupStore::new(
+                std::env::temp_dir().join(format!("myssh-mcp-bk-{}", std::process::id())),
+            ),
             token: String::new(),
             perms: all_perms(),
             policy: PolicyEngine::new(),
@@ -1919,6 +2102,9 @@ mod tests {
             terms: crate::mcp_terminal::McpTerminalState::new(),
             ui: crate::mcp_ui::McpUiHub::new(),
             term_mgr: Arc::new(crate::terminal::TerminalManager::default()),
+            backups: crate::mcp_files::BackupStore::new(
+                std::env::temp_dir().join(format!("myssh-mcp-bk-{}", std::process::id())),
+            ),
         };
         mgr.start(
             deps,
@@ -1987,7 +2173,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 400);
         let tools = rpc(&url, "tools/list", json!({})).await;
-        assert_eq!(tools["tools"].as_array().unwrap().len(), 19);
+        assert_eq!(tools["tools"].as_array().unwrap().len(), 25);
 
         mgr.stop().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -2113,6 +2299,78 @@ mod tests {
 
         let (_, is_err) = call_text(&url, "terminal_close", json!({ "terminalId": term_id })).await;
         assert!(!is_err, "terminal_close 报错");
+
+        // file_* 往返：新建 → 查看 → 编辑 → grep/glob → 回滚编辑 → 回滚新建（删除）
+        let call = |name: &'static str, args: Value| {
+            let url = url.clone();
+            async move {
+                let (text, is_err) = call_text(&url, name, args).await;
+                assert!(!is_err, "{name} 报错: {text}");
+                text
+            }
+        };
+        let dir_r = format!("myssh-e2e-files-{}", std::process::id());
+        let file_r = format!("{dir_r}/app.conf");
+        call("sftp_mkdir", json!({ "session_id": "e2e", "path": dir_r })).await;
+        let created = call(
+            "file_edit",
+            json!({ "session_id": "e2e", "path": file_r, "old_str": "", "new_str": "port=80\nname=web\n" }),
+        )
+        .await;
+        let create_bk = serde_json::from_str::<Value>(&created).unwrap()["backupId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let view = call("file_view", json!({ "session_id": "e2e", "path": file_r })).await;
+        assert!(view.contains("     1\tport=80"), "{view}");
+        let edited = call(
+            "file_edit",
+            json!({ "session_id": "e2e", "path": file_r, "old_str": "port=80", "new_str": "port=8080" }),
+        )
+        .await;
+        let edit_bk = serde_json::from_str::<Value>(&edited).unwrap()["backupId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let grep = call(
+            "file_grep",
+            json!({ "session_id": "e2e", "path": dir_r, "pattern": "port=\\d+" }),
+        )
+        .await;
+        assert!(grep.contains("app.conf:1:port=8080"), "{grep}");
+        let glob = call(
+            "file_glob",
+            json!({ "session_id": "e2e", "path": dir_r, "pattern": "*.conf" }),
+        )
+        .await;
+        assert!(glob.contains("app.conf"), "{glob}");
+        call(
+            "file_rollback",
+            json!({ "session_id": "e2e", "backup_id": edit_bk }),
+        )
+        .await;
+        let view = call("file_view", json!({ "session_id": "e2e", "path": file_r })).await;
+        assert!(
+            view.contains("port=80\n") && !view.contains("8080"),
+            "{view}"
+        );
+        // 新建备份的写后哈希 = 新建内容；编辑后又回滚回同内容，哈希一致 → 回滚即删除
+        call(
+            "file_rollback",
+            json!({ "session_id": "e2e", "backup_id": create_bk }),
+        )
+        .await;
+        let (text, is_err) = call_text(
+            &url,
+            "file_view",
+            json!({ "session_id": "e2e", "path": file_r }),
+        )
+        .await;
+        assert!(
+            is_err && text.contains("不存在"),
+            "回滚新建应删除文件: {text}"
+        );
+        call("sftp_delete", json!({ "session_id": "e2e", "path": dir_r })).await;
 
         mgr.stop().await;
         let _ = std::fs::remove_dir_all(&dir);

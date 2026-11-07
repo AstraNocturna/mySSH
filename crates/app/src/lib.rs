@@ -12,6 +12,7 @@ mod lifecycle;
 mod local_pty;
 mod logging;
 mod mcp;
+mod mcp_files;
 mod mcp_policy;
 mod mcp_terminal;
 mod mcp_ui;
@@ -70,6 +71,7 @@ pub fn run() {
     let mcp_terms = mcp_terminal::McpTerminalState::new();
     let mcp_ui_hub = mcp_ui::McpUiHub::new();
     let term_mgr = Arc::new(TerminalManager::default());
+    let ai_backups = mcp_files::BackupStore::new(mcp_files::BackupStore::default_root());
     // 会话变更失效扇出：命令只发事件，消费方在此登记（隧道/ctx 池）
     lifecycle::wire(
         &session_state.events,
@@ -93,6 +95,7 @@ pub fn run() {
         .manage(mcp_manager.clone())
         .manage(mcp_terms.clone())
         .manage(mcp_ui_hub.clone())
+        .manage(ai_backups.clone())
         .setup(move |app| {
             // 开机自启隧道：store 已就绪，后台拉起（失败仅日志，监督器自持重连）
             let mgr = tunnel_mgr_state.mgr.clone();
@@ -117,6 +120,7 @@ pub fn run() {
                 terms: mcp_terms.clone(),
                 ui: mcp_ui_hub.clone(),
                 term_mgr: term_mgr.clone(),
+                backups: ai_backups.clone(),
             };
             tauri::async_runtime::spawn(async move {
                 crate::mcp::boot_from_settings(mcp_manager, deps).await;
@@ -214,6 +218,8 @@ pub fn run() {
             mcp_ui::mcp_agent_tab_ready,
             mcp_terminal::mcp_share_tab,
             mcp_terminal::mcp_unshare_tab,
+            mcp_files::ai_backups_list,
+            mcp_files::ai_backup_restore,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

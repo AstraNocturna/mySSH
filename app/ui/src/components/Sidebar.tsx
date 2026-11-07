@@ -7,6 +7,7 @@ import { ContextMenu, type MenuItem } from './ContextMenu';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Dialog } from './Dialog';
 import { GroupPolicyDialog } from './GroupPolicyDialog';
+import { AiBackupsDialog } from './AiBackupsDialog';
 import {
   buildGroupTree,
   canMoveGroup,
@@ -75,6 +76,8 @@ export function Sidebar() {
   const [virt, setVirt] = useState<'favorites' | null>(null);
   /** 分组 MCP 策略编辑 */
   const [policyPath, setPolicyPath] = useState<string | null>(null);
+  /** AI 文件改动记录（备份/回滚） */
+  const [backupsOf, setBackupsOf] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     void load();
@@ -392,6 +395,12 @@ export function Sidebar() {
         label: fav ? t('chrome.menuUnfavorite') : t('chrome.menuFavorite'),
         icon: fav ? '☆' : '★',
         onSelect: () => s().toggleFavorite(rec.id),
+      },
+      {
+        label: t('chrome.menuAiBackups'),
+        icon: '↺',
+        disabled: rec.kind === 'local',
+        onSelect: () => setBackupsOf({ id: rec.id, name: rec.name }),
       },
       'separator',
       {
@@ -811,6 +820,7 @@ export function Sidebar() {
       {policyPath !== null && (
         <GroupPolicyDialog path={policyPath} onClose={() => setPolicyPath(null)} />
       )}
+      {backupsOf && <AiBackupsDialog session={backupsOf} onClose={() => setBackupsOf(null)} />}
 
       {/* 非空分组删除三选（统一 Dialog 基座：Esc=取消，默认焦点在安全选项） */}
       {groupDel && (

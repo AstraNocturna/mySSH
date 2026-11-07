@@ -135,6 +135,7 @@ export const enChrome: Record<keyof typeof zhChrome, string> = {
   'chrome.menuEdit': 'Edit',
   'chrome.menuRename': 'Rename…',
   'chrome.menuDuplicate': 'Duplicate Server',
+  'chrome.menuAiBackups': 'AI File Changes…',
   'chrome.menuFavorite': 'Add Favorite',
   'chrome.menuUnfavorite': 'Remove Favorite',
   'chrome.menuDelete': 'Delete',
