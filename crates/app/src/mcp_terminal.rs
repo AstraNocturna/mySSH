@@ -35,6 +35,9 @@ const READ_WAIT_MAX: u64 = 600;
 const READ_DEFAULT_BYTES: usize = 64 * 1024;
 /// terminal_open 建连 + 开 PTY 的超时（对齐 ssh_exec 默认预算）
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+/// headless 终端的 PTY 尺寸
+const HEADLESS_COLS: u32 = 120;
+const HEADLESS_ROWS: u32 = 32;
 
 /// 终端输出环形缓冲。offset 为全局字节游标：缓冲起点 = total - buf.len()。
 #[derive(Default)]
@@ -108,12 +111,16 @@ enum TermIo {
         task: tauri::async_runtime::JoinHandle<()>,
         /// 保持连接存活：SshConnection drop 即断连，会带走 PTY 通道
         conn: SshConnection,
+        /// 录像（建文件失败时为 None，终端照常可用）
+        rec: Option<Arc<crate::recording::Recorder>>,
     },
     /// UI 标签承载：输出来自标签读循环旁路，输入经 TerminalManager 仲裁（用户优先）
     Ui {
         tab_id: String,
         tap: Arc<crate::terminal::AgentTap>,
         kind: UiKind,
+        /// AI 接入时自动开始的录像及所在槽（退出控制时只停这一份）
+        rec: Option<(Arc<crate::recording::Recorder>, crate::recording::RecSlot)>,
     },
 }
 
@@ -154,13 +161,26 @@ impl McpTerm {
     /// 释放：headless 关通道 + abort 读任务；UI 承载只收回控制，标签留给用户
     async fn shutdown(&self) {
         match &self.io {
-            TermIo::Headless { writer, task, conn } => {
+            TermIo::Headless {
+                writer,
+                task,
+                conn,
+                rec,
+            } => {
                 if !conn.is_closed() {
                     let _ = writer.close().await;
                 }
                 task.abort();
+                if let Some(r) = rec {
+                    r.stop();
+                }
             }
-            TermIo::Ui { tap, .. } => tap.close(),
+            TermIo::Ui { tap, rec, .. } => {
+                tap.close();
+                if let Some((r, slot)) = rec {
+                    crate::recording::release_agent(slot, r);
+                }
+            }
         }
         self.shared.lock().closed = true;
     }
@@ -201,6 +221,7 @@ impl McpTerminalState {
         tap: Arc<crate::terminal::AgentTap>,
         session_id: Option<String>,
         kind: UiKind,
+        rec: Option<(Arc<crate::recording::Recorder>, crate::recording::RecSlot)>,
     ) -> String {
         let id = gen_term_id();
         let term = McpTerm {
@@ -210,6 +231,7 @@ impl McpTerminalState {
                 tab_id: tab_id.to_string(),
                 tap,
                 kind,
+                rec,
             },
         };
         self.terms.lock().insert(id.clone(), Arc::new(term));
@@ -220,10 +242,13 @@ impl McpTerminalState {
     pub(crate) fn share_tab(
         &self,
         mgr: &crate::terminal::TerminalManager,
+        recs: &crate::recording::RecordingStore,
         tab_id: &str,
+        title: &str,
     ) -> Result<(String, Option<String>), String> {
         let (tap, session_id) = mgr.attach_tap(tab_id)?;
-        let id = self.insert_ui(tab_id, tap, session_id.clone(), UiKind::Shared);
+        let rec = agent_recording(mgr, recs, tab_id, title);
+        let id = self.insert_ui(tab_id, tap, session_id.clone(), UiKind::Shared, rec);
         Ok((id, session_id))
     }
 
@@ -255,12 +280,29 @@ impl McpTerminalState {
     }
 }
 
+/// AI 接入 UI 标签时自动开始录像（已在录则沿用）；建文件失败只记日志，不挡终端
+fn agent_recording(
+    mgr: &crate::terminal::TerminalManager,
+    recs: &crate::recording::RecordingStore,
+    tab_id: &str,
+    title: &str,
+) -> Option<(Arc<crate::recording::Recorder>, crate::recording::RecSlot)> {
+    match mgr.start_recording(tab_id, recs, title, crate::recording::RecSource::Agent) {
+        Ok(pair) => Some(pair),
+        Err(e) => {
+            tracing::warn!(tab_id, error = %e, "AI 终端录像启动失败");
+            None
+        }
+    }
+}
+
 /// terminal_* 工具执行所需的应用级状态
 pub(crate) struct TermCtx<'a> {
     pub store: &'a Arc<Store>,
     pub terms: &'a Arc<McpTerminalState>,
     pub ui: &'a Arc<crate::mcp_ui::McpUiHub>,
     pub mgr: &'a Arc<crate::terminal::TerminalManager>,
+    pub recs: &'a Arc<crate::recording::RecordingStore>,
 }
 
 /// terminal_* 工具分发（外层 call_tool 已按 terminal_ 前缀过滤，此处校验具体名）
@@ -322,20 +364,43 @@ async fn terminal_open(ctx: &TermCtx<'_>, args: &Value) -> Result<String, String
     let (mut reader, writer) = pty.split();
     let id = gen_term_id();
     let shared = Arc::new(Mutex::new(TermBuf::default()));
+    let rec = ctx
+        .recs
+        .start(
+            &format!("AI · {host}"),
+            crate::recording::RecSource::Agent,
+            Some(session_id.to_string()),
+            HEADLESS_COLS,
+            HEADLESS_ROWS,
+        )
+        .inspect_err(|e| tracing::warn!(error = %e, "AI 终端录像启动失败"))
+        .ok();
     // 读任务：PTY 读半单消费者循环追加缓冲；EOF/Close → 置 closed 退出
     let task = {
         let shared = Arc::clone(&shared);
+        let rec = rec.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(data) = reader.next_data().await {
+                if let Some(r) = &rec {
+                    r.output(&data);
+                }
                 shared.lock().append(&data);
             }
             shared.lock().closed = true;
+            if let Some(r) = &rec {
+                r.stop();
+            }
         })
     };
     let sess = Arc::new(McpTerm {
         session_id: Some(session_id.to_string()),
         shared,
-        io: TermIo::Headless { writer, task, conn },
+        io: TermIo::Headless {
+            writer,
+            task,
+            conn,
+            rec,
+        },
     });
     ctx.terms.terms.lock().insert(id.clone(), sess);
     audit(
@@ -376,9 +441,14 @@ async fn terminal_open_ui(
         }
     };
     let (tap, _) = ctx.mgr.attach_tap(&tab_id)?;
-    let id = ctx
-        .terms
-        .insert_ui(&tab_id, tap, Some(session_id.to_string()), UiKind::Agent);
+    let rec = agent_recording(ctx.mgr, ctx.recs, &tab_id, &format!("AI · {name}"));
+    let id = ctx.terms.insert_ui(
+        &tab_id,
+        tap,
+        Some(session_id.to_string()),
+        UiKind::Agent,
+        rec,
+    );
     ctx.ui.emit(&json!({
         "type": "agent_terminal_attached",
         "tabId": tab_id,
@@ -416,7 +486,7 @@ async fn terminal_open_inner(
             }
         })?;
     let pty = conn
-        .open_pty("xterm", 120, 32, None)
+        .open_pty("xterm", HEADLESS_COLS, HEADLESS_ROWS, None)
         .await
         .map_err(|e| e.to_string())?;
     Ok((conn, pty))
@@ -445,8 +515,11 @@ async fn terminal_send(ctx: &TermCtx<'_>, args: &Value) -> Result<String, String
         bytes.push(b'\n');
     }
     match &sess.io {
-        TermIo::Headless { writer, .. } => {
+        TermIo::Headless { writer, rec, .. } => {
             writer.write(&bytes).await.map_err(|e| e.to_string())?;
+            if let Some(r) = rec {
+                r.input(&bytes);
+            }
         }
         TermIo::Ui { tab_id, tap, .. } => ctx.mgr.agent_write(tab_id, tap, &bytes).await?,
     }
@@ -589,8 +662,10 @@ fn terminal_list(terms: &Arc<McpTerminalState>) -> String {
 #[tauri::command]
 pub async fn mcp_share_tab(
     tab_id: String,
+    title: Option<String>,
     terms: tauri::State<'_, Arc<McpTerminalState>>,
     mgr: tauri::State<'_, Arc<crate::terminal::TerminalManager>>,
+    recs: tauri::State<'_, Arc<crate::recording::RecordingStore>>,
     sessions: tauri::State<'_, Arc<crate::sessions::SessionManagerState>>,
 ) -> Result<Value, String> {
     let store = &sessions.store;
@@ -600,7 +675,8 @@ pub async fn mcp_share_tab(
             "MCP 未启用或该会话未放行「交互终端」权限（设置 → MCP / 会话编辑器 → MCP 权限）".into(),
         );
     }
-    let (id, sid) = terms.share_tab(&mgr, &tab_id)?;
+    let title = format!("AI · {}", title.as_deref().unwrap_or(&tab_id));
+    let (id, sid) = terms.share_tab(&mgr, &recs, &tab_id, &title)?;
     let _ = store
         .audit()
         .append(
@@ -709,8 +785,14 @@ mod tests {
         let st = McpTerminalState::new();
         let tap_a = Arc::new(crate::terminal::AgentTap::new());
         let tap_b = Arc::new(crate::terminal::AgentTap::new());
-        let a = st.insert_ui("tabA", tap_a.clone(), Some("s1".into()), UiKind::Shared);
-        let b = st.insert_ui("tabB", tap_b.clone(), None, UiKind::Agent);
+        let a = st.insert_ui(
+            "tabA",
+            tap_a.clone(),
+            Some("s1".into()),
+            UiKind::Shared,
+            None,
+        );
+        let b = st.insert_ui("tabB", tap_b.clone(), None, UiKind::Agent, None);
         assert_eq!(st.revoke_tab("tabA").await, Some(Some("s1".into())));
         assert!(tap_a.is_closed(), "收回后旁路关闭，读循环不再 tee");
         assert!(st.get(&a).is_err(), "收回后 agent 无法再访问");
@@ -726,7 +808,7 @@ mod tests {
     async fn read_waits_for_prompt_and_strips_ansi() {
         let st = McpTerminalState::new();
         let tap = Arc::new(crate::terminal::AgentTap::new());
-        let id = st.insert_ui("tab", tap.clone(), None, UiKind::Agent);
+        let id = st.insert_ui("tab", tap.clone(), None, UiKind::Agent, None);
         tap.out.lock().append(b"ls\r\n");
         let out = tap.out.clone();
         tokio::spawn(async move {
@@ -756,7 +838,7 @@ mod tests {
     async fn read_idle_and_paging() {
         let st = McpTerminalState::new();
         let tap = Arc::new(crate::terminal::AgentTap::new());
-        let id = st.insert_ui("tab", tap.clone(), None, UiKind::Agent);
+        let id = st.insert_ui("tab", tap.clone(), None, UiKind::Agent, None);
         let out = tap.out.clone();
         tokio::spawn(async move {
             for i in 0..3 {

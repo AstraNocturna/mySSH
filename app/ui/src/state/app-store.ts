@@ -177,6 +177,13 @@ interface AppStore {
   /** 命令片段管理框 */
   snippetsOpen: boolean;
   toggleSnippets(): void;
+  /** 会话录像管理框 */
+  recordingsOpen: boolean;
+  toggleRecordings(): void;
+  /** 录制中的终端（键 = 后端 tabId；仅记录用户手动开始的录像） */
+  recTabs: Record<string, true>;
+  startRecording(backendTabId: string, title: string): Promise<void>;
+  stopRecording(backendTabId: string): Promise<void>;
   /** 分级通知堆叠（toast）；12.1：可选可序列化动作（actionId 经 notice-actions 注册表分发） */
   notices: Notice[];
   notify(
@@ -505,7 +512,10 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     shareTabWithAi: async (backendTabId) => {
       try {
-        await invoke('mcp_share_tab', { tabId: backendTabId });
+        const title = get().tabs.find((t) =>
+          Object.values(t.panes).some((p) => p.session.tabId === backendTabId),
+        )?.title;
+        await invoke('mcp_share_tab', { tabId: backendTabId, title: title ?? null });
         set((s) => ({ aiTabs: { ...s.aiTabs, [backendTabId]: 'shared' } }));
         get().notify(tNow('state.aiShared'), 'success');
       } catch (e) {
@@ -690,6 +700,31 @@ export const useAppStore = create<AppStore>((set, get) => {
     togglePalette: () => set((s) => ({ paletteOpen: !s.paletteOpen })),
     snippetsOpen: false,
     toggleSnippets: () => set((s) => ({ snippetsOpen: !s.snippetsOpen })),
+    recordingsOpen: false,
+    toggleRecordings: () => set((s) => ({ recordingsOpen: !s.recordingsOpen })),
+    recTabs: {},
+    startRecording: async (backendTabId, title) => {
+      try {
+        await invoke('term_record_start', { tabId: backendTabId, title });
+        set((s) => ({ recTabs: { ...s.recTabs, [backendTabId]: true } }));
+        get().notify(tNow('state.recStarted'), 'success');
+      } catch (e) {
+        get().notify(tNow('state.recFailed', { error: String(e) }), 'error');
+      }
+    },
+    stopRecording: async (backendTabId) => {
+      set((s) => ({
+        recTabs: Object.fromEntries(Object.entries(s.recTabs).filter(([k]) => k !== backendTabId)),
+      }));
+      try {
+        const meta = await invoke<{ title: string } | null>('term_record_stop', {
+          tabId: backendTabId,
+        });
+        if (meta) get().notify(tNow('state.recStopped', { title: meta.title }), 'success');
+      } catch (e) {
+        get().notify(tNow('state.recFailed', { error: String(e) }), 'error');
+      }
+    },
     broadcastEnabled: false,
     toggleBroadcast: () => set((s) => ({ broadcastEnabled: !s.broadcastEnabled })),
     quickConnectOpen: false,

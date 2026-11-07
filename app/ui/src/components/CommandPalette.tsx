@@ -210,6 +210,11 @@ export function CommandPalette() {
         run: () => useAppStore.getState().toggleSnippets(),
       },
       {
+        id: 'a-recordings',
+        label: t('chrome.actRecordings'),
+        run: () => useAppStore.getState().toggleRecordings(),
+      },
+      {
         id: 'a-exp-plain',
         label: t('chrome.actExportPlain'),
         run: () => exportConfig(false),

@@ -133,13 +133,16 @@ impl TerminalManager {
             sessions
                 .get(tab_id)
                 .filter(|s| s.tap.lock().as_ref().is_some_and(|t| Arc::ptr_eq(t, tap)))
-                .map(|s| (s.writer.clone(), s.input_enc.clone()))
+                .map(|s| (s.writer.clone(), s.input_enc.clone(), s.rec.clone()))
         };
-        let Some((w, input_enc)) = entry.filter(|_| !tap.is_closed()) else {
+        let Some((w, input_enc, rec)) = entry.filter(|_| !tap.is_closed()) else {
             return Err("终端已关闭或已被用户收回控制".into());
         };
         if tap.user_active(Instant::now()) {
             return Err("用户正在该终端输入，AI 已让出输入权；请稍后重试".into());
+        }
+        if let Some(r) = rec.lock().as_ref() {
+            r.input(data);
         }
         let bytes = match input_enc {
             Some(enc) => enc.lock().encode(data),
@@ -147,6 +150,83 @@ impl TerminalManager {
         };
         w.write(&bytes).await
     }
+}
+
+/// 会话录像：TerminalManager 侧的接入面
+impl TerminalManager {
+    /// 开始录制；已在录则返回现有录像（用户开始的会接管 AI 自动录像，AI 退出后不停）。
+    /// 返回录像与所在槽（AI 退出时据此只停自己开始的那份）。
+    pub(crate) fn start_recording(
+        &self,
+        tab_id: &str,
+        recs: &crate::recording::RecordingStore,
+        title: &str,
+        source: crate::recording::RecSource,
+    ) -> Result<(Arc<crate::recording::Recorder>, crate::recording::RecSlot), String> {
+        let (slot, session_id, cols, rows) = {
+            let sessions = self.sessions.lock();
+            let s = sessions
+                .get(tab_id)
+                .ok_or_else(|| format!("终端标签 {tab_id} 不存在或已关闭"))?;
+            if let Some(r) = s.rec.lock().as_ref() {
+                if source == crate::recording::RecSource::User {
+                    r.claim_for_user();
+                }
+                return Ok((r.clone(), s.rec.clone()));
+            }
+            (
+                s.rec.clone(),
+                s.session_id.clone(),
+                s.cols.load(Ordering::Relaxed) as u32,
+                s.rows.load(Ordering::Relaxed) as u32,
+            )
+        };
+        // 建文件在 sessions 锁外：term_input 等热路径共用该锁
+        let rec = recs.start(title, source, session_id, cols, rows)?;
+        let mut g = slot.lock();
+        if let Some(existing) = g.as_ref() {
+            // 并发开始：保留先到的一份，本份立即收尾
+            rec.stop();
+            return Ok((existing.clone(), slot.clone()));
+        }
+        *g = Some(rec.clone());
+        drop(g);
+        Ok((rec, slot))
+    }
+
+    /// 停止录制；返回被停的录像（未在录为 None）
+    pub(crate) fn stop_recording(&self, tab_id: &str) -> Option<Arc<crate::recording::Recorder>> {
+        let slot = self.sessions.lock().get(tab_id).map(|s| s.rec.clone())?;
+        let rec = slot.lock().take();
+        rec
+    }
+}
+
+/// 开始录制标签输出（右键菜单）；返回录像 id
+#[tauri::command]
+pub async fn term_record_start(
+    tab_id: String,
+    title: String,
+    state: tauri::State<'_, Arc<TerminalManager>>,
+    recs: tauri::State<'_, Arc<crate::recording::RecordingStore>>,
+) -> Result<String, String> {
+    let (rec, _) =
+        state.start_recording(&tab_id, &recs, &title, crate::recording::RecSource::User)?;
+    Ok(rec.id.clone())
+}
+
+/// 停止录制并等写盘收尾；返回录像元数据（未在录为 None）
+#[tauri::command]
+pub async fn term_record_stop(
+    tab_id: String,
+    state: tauri::State<'_, Arc<TerminalManager>>,
+) -> Result<Option<crate::recording::RecordingMeta>, String> {
+    let Some(rec) = state.stop_recording(&tab_id) else {
+        return Ok(None);
+    };
+    tauri::async_runtime::spawn_blocking(move || rec.finish())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 static TAB_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -208,6 +288,7 @@ pub async fn term_open(
             let ring = Arc::new(RingBuf::new(RING_CAP));
             let writer = Arc::new(AnyWriter::Local(pty.writer));
             let tap = session::TapSlot::default();
+            let rec = crate::recording::RecSlot::default();
             let task = tauri::async_runtime::spawn(supervise(SuperviseCtx {
                 tab_id: tab_id.clone(),
                 mgr: mgr.clone(),
@@ -228,6 +309,7 @@ pub async fn term_open(
                 focused: focused.clone(),
                 ring: ring.clone(),
                 tap: tap.clone(),
+                rec: rec.clone(),
                 reader: AnyReader::Local(pty.reader),
             }));
             mgr.sessions.lock().insert(
@@ -242,6 +324,7 @@ pub async fn term_open(
                     focused,
                     ring,
                     tap,
+                    rec,
                     task,
                 },
             );
@@ -374,6 +457,7 @@ pub async fn term_open(
     let focused = Arc::new(AtomicBool::new(true));
     let ring = Arc::new(RingBuf::new(RING_CAP));
     let tap = session::TapSlot::default();
+    let rec = crate::recording::RecSlot::default();
     let task = tauri::async_runtime::spawn(supervise(SuperviseCtx {
         tab_id: tab_id.clone(),
         mgr: mgr.clone(),
@@ -396,6 +480,7 @@ pub async fn term_open(
         focused: focused.clone(),
         ring: ring.clone(),
         tap: tap.clone(),
+        rec: rec.clone(),
         reader: AnyReader::Ssh(reader),
     }));
 
@@ -411,6 +496,7 @@ pub async fn term_open(
             focused,
             ring,
             tap,
+            rec,
             task,
         },
     );
@@ -521,6 +607,9 @@ pub async fn term_resize(
         sessions.get(&tab_id).map(|s| {
             s.cols.store(cols as u64, Ordering::Relaxed);
             s.rows.store(rows as u64, Ordering::Relaxed);
+            if let Some(r) = s.rec.lock().as_ref() {
+                r.resize(cols, rows);
+            }
             s.writer.clone()
         })
     };
@@ -540,6 +629,7 @@ pub async fn term_close(
     let session = state.sessions.lock().remove(&tab_id);
     if let Some(session) = session {
         session::close_tap(&session.tap);
+        crate::recording::stop_slot(&session.rec);
         let _ = session.writer.close().await;
         session.task.abort();
         if let Some(sid) = session.session_id {

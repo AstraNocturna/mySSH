@@ -21,6 +21,7 @@ mod mcp_text;
 mod mcp_ui;
 mod monitor;
 mod perf;
+mod recording;
 mod sessions;
 mod settings;
 mod sftp;
@@ -76,6 +77,10 @@ pub fn run() {
     let mcp_ui_hub = mcp_ui::McpUiHub::new();
     let term_mgr = Arc::new(TerminalManager::default());
     let ai_backups = mcp_files::BackupStore::new(mcp_files::BackupStore::default_root());
+    let recordings = recording::RecordingStore::new(
+        recording::RecordingStore::default_root(),
+        Some(session_state.store.clone()),
+    );
     // 会话变更失效扇出：命令只发事件，消费方在此登记（隧道/ctx 池）
     lifecycle::wire(
         &session_state.events,
@@ -101,6 +106,7 @@ pub fn run() {
         .manage(mcp_jobs.clone())
         .manage(mcp_ui_hub.clone())
         .manage(ai_backups.clone())
+        .manage(recordings.clone())
         .setup(move |app| {
             // 开机自启隧道：store 已就绪，后台拉起（失败仅日志，监督器自持重连）
             let mgr = tunnel_mgr_state.mgr.clone();
@@ -127,6 +133,7 @@ pub fn run() {
                 term_mgr: term_mgr.clone(),
                 backups: ai_backups.clone(),
                 jobs: mcp_jobs.clone(),
+                recs: recordings.clone(),
             };
             tauri::async_runtime::spawn(async move {
                 crate::mcp::boot_from_settings(mcp_manager, deps).await;
@@ -146,6 +153,14 @@ pub fn run() {
             terminal::term_focus,
             terminal::term_resize,
             terminal::term_close,
+            terminal::term_record_start,
+            terminal::term_record_stop,
+            recording::recordings_list,
+            recording::recording_load,
+            recording::recording_export_text,
+            recording::recording_delete,
+            recording::recording_verify,
+            recording::audit_verify_chain,
             terminal::hostkey_confirm,
             terminal::ki_respond,
             files::read_private_key,

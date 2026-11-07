@@ -227,6 +227,8 @@ pub(super) struct TermSession {
     pub(super) ring: Arc<RingBuf>,
     /// AI 共享旁路（None = 未共享）
     pub(super) tap: TapSlot,
+    /// 会话录像（None = 未录制）
+    pub(super) rec: crate::recording::RecSlot,
     pub(super) task: tauri::async_runtime::JoinHandle<()>,
 }
 
@@ -313,6 +315,7 @@ pub(super) struct SuperviseCtx {
     pub(super) focused: Arc<AtomicBool>,
     pub(super) ring: Arc<RingBuf>,
     pub(super) tap: TapSlot,
+    pub(super) rec: crate::recording::RecSlot,
     pub(super) reader: AnyReader,
 }
 
@@ -379,6 +382,7 @@ pub(super) async fn supervise(mut ctx: SuperviseCtx) {
             &mut macro_pending,
             Some(&ctx.writer),
             Some(&ctx.tap),
+            Some(&ctx.rec),
         )
         .await;
 
@@ -397,6 +401,7 @@ pub(super) async fn supervise(mut ctx: SuperviseCtx) {
             ));
             ctx.mgr.sessions.lock().remove(&ctx.tab_id);
             close_tap(&ctx.tap);
+            crate::recording::stop_slot(&ctx.rec);
             stop_session_tunnels_if_last(&ctx);
             return;
         }
@@ -410,6 +415,7 @@ pub(super) async fn supervise(mut ctx: SuperviseCtx) {
                 ));
                 ctx.mgr.sessions.lock().remove(&ctx.tab_id);
                 close_tap(&ctx.tap);
+                crate::recording::stop_slot(&ctx.rec);
                 stop_session_tunnels_if_last(&ctx);
                 return;
             }

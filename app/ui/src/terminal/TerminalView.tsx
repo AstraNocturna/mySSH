@@ -550,6 +550,21 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
         },
       },
       'separator',
+      backendTabId && s.recTabs[backendTabId]
+        ? {
+            label: t('state.menu.recordStop'),
+            icon: '■',
+            onSelect: () => void s.stopRecording(backendTabId),
+          }
+        : {
+            label: t('state.menu.recordStart'),
+            icon: '●',
+            disabled: !backendTabId || pane.state !== 'connected',
+            onSelect: () => {
+              if (backendTabId) void s.startRecording(backendTabId, tab.title);
+            },
+          },
+      { label: t('state.menu.recordings'), icon: '▷', onSelect: () => s.toggleRecordings() },
       backendTabId && s.aiTabs[backendTabId]
         ? {
             label: t('state.menu.revokeAi'),
