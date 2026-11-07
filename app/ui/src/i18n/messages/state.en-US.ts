@@ -117,4 +117,12 @@ export const enState: Record<keyof typeof zhState, string> = {
   'state.menu.clearScreen': 'Clear Screen',
   'state.menu.reconnect': 'Reconnect',
   'state.menu.openSftp': 'Open SFTP',
+  'state.menu.shareAi': 'Share with AI',
+  'state.menu.revokeAi': 'Take back AI control',
+  'state.aiShared': 'Shared with AI (visible to the agent via terminal_list)',
+  'state.aiShareFailed': 'Failed to share with AI: {error}',
+  'state.aiRevoked': 'AI control revoked',
+  'state.aiTabOpened': 'AI opened a terminal: {name}',
+  'state.aiTabNoSession': 'Session not found or is a local session',
+  'state.aiTabClosedByUser': 'The user closed the tab',
 };

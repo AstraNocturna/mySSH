@@ -8,7 +8,14 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
-import { isLocalTarget, useAppStore, type Pane, type Tab } from '../state/app-store';
+import {
+  isLocalTarget,
+  reportAgentTab,
+  takeAgentRequest,
+  useAppStore,
+  type Pane,
+  type Tab,
+} from '../state/app-store';
 import { fitRegistry, reconnectRegistry, termRegistry, webglRegistry } from '../term/registry';
 import { resolveTheme } from '../term/themes';
 import {
@@ -117,15 +124,22 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
 
     /** 建立（或原位重连）SSH 通道；attach 幂等防重复订阅 */
     const attachNow = (r: PaneRuntime) => {
-      pane.session.attach(r.term, tab.target, r.stateHook).catch((e: unknown) => {
-        setPaneState(tab.id, pane.id, 'error');
-        const msg = tNow('state.connectFailed', { error: String(e) });
-        r.ui.setDead(msg);
-        if (tab.target.kind === 'session')
-          useAppStore.getState().recordConnectFailure(tab.target.sessionId, msg);
+      const agentReq = takeAgentRequest(pane.id);
+      pane.session
+        .attach(r.term, tab.target, r.stateHook)
+        .then((backendTabId) => {
+          if (agentReq) reportAgentTab(agentReq, backendTabId);
+        })
+        .catch((e: unknown) => {
+          if (agentReq) reportAgentTab(agentReq, null, String(e));
+          setPaneState(tab.id, pane.id, 'error');
+          const msg = tNow('state.connectFailed', { error: String(e) });
+          r.ui.setDead(msg);
+          if (tab.target.kind === 'session')
+            useAppStore.getState().recordConnectFailure(tab.target.sessionId, msg);
 
-        r.term.write(`\r\n\x1b[1;31m${msg}\x1b[0m\r\n`);
-      });
+          r.term.write(`\r\n\x1b[1;31m${msg}\x1b[0m\r\n`);
+        });
     };
 
     /** setDead 同步写 runtime 缓存：重挂后新实例可恢复原位操作层 */
@@ -472,6 +486,7 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
     const isSession = tab.target.kind === 'session';
     const isRemote = isSession && !isLocalTarget(tab.target);
     const paste = () => readClipboard();
+    const backendTabId = pane.session.tabId;
     return [
       { label: t('state.key.paste'), icon: '⤵', onSelect: paste },
       {
@@ -510,6 +525,21 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
           if (cwd) useTransferStore.getState().requestNav(tab.id, cwd);
         },
       },
+      'separator',
+      backendTabId && s.aiTabs[backendTabId]
+        ? {
+            label: t('state.menu.revokeAi'),
+            icon: '⏏',
+            onSelect: () => void s.revokeAiTab(backendTabId),
+          }
+        : {
+            label: t('state.menu.shareAi'),
+            icon: '⚇',
+            disabled: !isRemote || !backendTabId || pane.state !== 'connected',
+            onSelect: () => {
+              if (backendTabId) void s.shareTabWithAi(backendTabId);
+            },
+          },
     ];
   }
 }

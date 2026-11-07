@@ -111,7 +111,8 @@ fn tool_group_key(name: &str) -> Option<&'static str> {
     match name {
         "list_sessions" => Some("list_sessions"),
         "ssh_exec" => Some("ssh_exec"),
-        "terminal_open" | "terminal_send" | "terminal_read" | "terminal_close" => Some("terminal"),
+        "terminal_open" | "terminal_send" | "terminal_read" | "terminal_close"
+        | "terminal_list" => Some("terminal"),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" => Some("sftp_read"),
         "sftp_write" | "sftp_mkdir" | "sftp_delete" | "sftp_rename" | "sftp_chmod" => {
             Some("sftp_write")
@@ -159,6 +160,26 @@ async fn tool_allowed(st: &ServerState, name: &str, args: &Value) -> bool {
         Ok(rec) => {
             let groups = crate::mcp_policy::load_group_policies(&st.store).await;
             crate::mcp_policy::resolve_perm(&rec, &groups, key, global)
+        }
+        Err(_) => global,
+    }
+}
+
+/// 用户共享标签前的预检：MCP 已启用，且该会话（会话 → 分组 → 全局）放行 terminal 组
+pub(crate) async fn terminal_usable(store: &Store, session_id: Option<&str>) -> bool {
+    let settings = store.settings();
+    let get = async |key: &str| settings.get(key).await.ok().flatten();
+    if !parse_bool_setting(get("mcp.enabled").await.as_deref()) {
+        return false;
+    }
+    let global = parse_bool_setting(get("mcp.allow.terminal").await.as_deref());
+    let Some(sid) = session_id else {
+        return global;
+    };
+    match store.sessions().get(sid).await {
+        Ok(rec) => {
+            let groups = crate::mcp_policy::load_group_policies(store).await;
+            crate::mcp_policy::resolve_perm(&rec, &groups, "terminal", global)
         }
         Err(_) => global,
     }
@@ -286,6 +307,8 @@ pub struct McpDeps {
     pub exec: Arc<crate::exec::ExecManagerState>,
     pub terms: Arc<crate::mcp_terminal::McpTerminalState>,
     pub ui: Arc<crate::mcp_ui::McpUiHub>,
+    /// UI 终端管理器（agent 终端以标签打开 / 用户共享标签）
+    pub term_mgr: Arc<crate::terminal::TerminalManager>,
 }
 
 /// MCP 服务生命周期管理：持有 tokio task + shutdown watch
@@ -302,6 +325,8 @@ struct McpInner {
     token: String,
     /// 交互式终端注册表（start 时挂入，stop 清场）
     terms: Option<Arc<crate::mcp_terminal::McpTerminalState>>,
+    /// 前端交互枢纽（stop 时通知前端摘除 AI 控制标记）
+    ui: Option<Arc<crate::mcp_ui::McpUiHub>>,
 }
 
 impl McpManager {
@@ -325,13 +350,15 @@ impl McpManager {
             exec,
             terms,
             ui,
+            term_mgr,
         } = deps;
         let state = Arc::new(ServerState {
             store,
             sftp,
             exec,
             terms: terms.clone(),
-            ui,
+            ui: ui.clone(),
+            term_mgr,
             token: token.clone(),
             perms,
             // 安全模型执行面（M0 只读档）：判定管线 + 每会话速率闸，随服务同生命周期
@@ -369,20 +396,30 @@ impl McpManager {
         inner.port = port;
         inner.token = token;
         inner.terms = Some(terms);
+        inner.ui = Some(ui);
         tracing::info!(port, "MCP 服务已启动（127.0.0.1）");
         Ok(())
     }
 
     /// 停止服务：先发 shutdown 信号走优雅退出，超过 STOP_GRACE 则 abort
     pub async fn stop(&self) {
-        let (tx, task, terms) = {
+        let (tx, task, terms, ui) = {
             let mut inner = self.inner.lock();
             inner.port = 0;
-            (inner.shutdown.take(), inner.task.take(), inner.terms.take())
+            (
+                inner.shutdown.take(),
+                inner.task.take(),
+                inner.terms.take(),
+                inner.ui.take(),
+            )
         };
-        // 交互式终端清场：关通道 + abort 读任务，不留孤儿 Bulk 连接
+        // 交互式终端清场：关通道 + abort 读任务，不留孤儿 Bulk 连接；UI 标签只收回控制
         if let Some(terms) = terms {
-            terms.close_all().await;
+            for tab in terms.close_all().await {
+                if let Some(ui) = &ui {
+                    ui.emit(&json!({ "type": "agent_terminal_closed", "tabId": tab }));
+                }
+            }
         }
         if let Some(tx) = tx {
             let _ = tx.send(true);
@@ -458,6 +495,7 @@ pub async fn mcp_restart(
     exec: tauri::State<'_, Arc<crate::exec::ExecManagerState>>,
     terms: tauri::State<'_, Arc<crate::mcp_terminal::McpTerminalState>>,
     ui: tauri::State<'_, Arc<crate::mcp_ui::McpUiHub>>,
+    term_mgr: tauri::State<'_, Arc<crate::terminal::TerminalManager>>,
 ) -> Result<Value, String> {
     let deps = McpDeps {
         store: sessions.store.clone(),
@@ -465,6 +503,7 @@ pub async fn mcp_restart(
         exec: exec.inner().clone(),
         terms: terms.inner().clone(),
         ui: ui.inner().clone(),
+        term_mgr: term_mgr.inner().clone(),
     };
     restart_from_settings(&state, deps).await
 }
@@ -478,8 +517,9 @@ struct ServerState {
     exec: Arc<crate::exec::ExecManagerState>,
     /// 交互式终端注册表（terminal_* 工具；stop 时 close_all 清场）
     terms: Arc<crate::mcp_terminal::McpTerminalState>,
-    /// 前端交互枢纽（危险命令审批弹窗）
+    /// 前端交互枢纽（危险命令审批弹窗、agent 终端开标签）
     ui: Arc<crate::mcp_ui::McpUiHub>,
+    term_mgr: Arc<crate::terminal::TerminalManager>,
     token: String,
     /// 工具分组权限（启动时快照；改设置后 mcp_restart 生效）
     perms: McpPerms,
@@ -686,11 +726,12 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "terminal_open",
-                "description": "在已保存的 SSH 会话上打开交互式终端（有状态 shell：cd、进 mysql、激活 venv 等状态跨调用保持），返回 terminalId。独立 Bulk 连接，xterm 120x32。仅 SSH 会话；本地会话与 keyboard-interactive 认证会被拒绝。输出用 terminal_read 轮询，用完用 terminal_close 释放。",
+                "description": "在已保存的 SSH 会话上打开交互式终端（有状态 shell：cd、进 mysql、激活 venv 等状态跨调用保持），返回 terminalId。mySSH 窗口在线时以普通标签页打开（visible=true）：用户可旁观、键入时 AI 写入被暂拒、可随时收回控制；否则（或 headless=true）走独立后台连接（xterm 120x32，keyboard-interactive 认证会被拒绝）。仅 SSH 会话。输出用 terminal_read 轮询，用完用 terminal_close 释放。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "session_id": { "type": "string", "description": "会话档案 id（list_sessions 返回的 id）" }
+                        "session_id": { "type": "string", "description": "会话档案 id（list_sessions 返回的 id）" },
+                        "headless": { "type": "boolean", "default": false, "description": "true = 不在 mySSH 窗口显示，走后台连接" }
                     },
                     "required": ["session_id"],
                     "additionalProperties": false
@@ -725,8 +766,13 @@ fn tools_list(perms: &McpPerms) -> Value {
                 }
             },
             {
+                "name": "terminal_list",
+                "description": "列出当前可用的终端（terminalId/sessionId/kind/closed）。kind=shared_tab 表示用户主动把 mySSH 标签共享给了 AI；agent_tab 为 terminal_open 打开的标签；headless 为后台终端",
+                "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            },
+            {
                 "name": "terminal_close",
-                "description": "关闭终端：断通道、终止读任务、释放连接（落审计）",
+                "description": "关闭终端：后台终端断通道并释放连接；mySSH 标签只收回 AI 控制、标签保留给用户（落审计）",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -927,6 +973,7 @@ fn tool_annotations(name: &str) -> Value {
         "list_sessions" => (true, false, true, false),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "sftp_transfer_list"
         | "terminal_read" => (true, false, true, true),
+        "terminal_list" => (true, false, true, false),
         "ssh_exec" | "terminal_send" => (false, true, false, true),
         "terminal_open" | "terminal_close" | "sftp_mkdir" => (false, false, false, true),
         "sftp_write" | "sftp_delete" | "sftp_chmod" | "sftp_upload" | "sftp_download" => {
@@ -973,7 +1020,13 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
         },
         // 交互式终端工具族（有状态 shell；实现见 mcp_terminal.rs）
         n if n.starts_with("terminal_") => {
-            match crate::mcp_terminal::terminal_tool(&st.store, &st.terms, n, args).await {
+            let ctx = crate::mcp_terminal::TermCtx {
+                store: &st.store,
+                terms: &st.terms,
+                ui: &st.ui,
+                mgr: &st.term_mgr,
+            };
+            match crate::mcp_terminal::terminal_tool(&ctx, n, args).await {
                 Ok(text) => ok_content(text),
                 Err(e) => err_content(e),
             }
@@ -1636,7 +1689,8 @@ mod tests {
         assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 14);
         let all = tools_list(&all_perms());
         let names = names_of(&all);
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 19);
+        assert!(names.contains(&"terminal_list"));
         assert!(names.contains(&"sftp_upload"));
         assert!(names.contains(&"sftp_download"));
         assert!(names.contains(&"terminal_open"));
@@ -1763,6 +1817,7 @@ mod tests {
             exec: crate::exec::ExecManagerState::new(tokio::runtime::Handle::current()),
             terms: crate::mcp_terminal::McpTerminalState::new(),
             ui,
+            term_mgr: Arc::new(crate::terminal::TerminalManager::default()),
             token: String::new(),
             perms: all_perms(),
             policy: PolicyEngine::new(),
@@ -1863,6 +1918,7 @@ mod tests {
             exec: crate::exec::ExecManagerState::new(tokio::runtime::Handle::current()),
             terms: crate::mcp_terminal::McpTerminalState::new(),
             ui: crate::mcp_ui::McpUiHub::new(),
+            term_mgr: Arc::new(crate::terminal::TerminalManager::default()),
         };
         mgr.start(
             deps,
@@ -1931,7 +1987,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 400);
         let tools = rpc(&url, "tools/list", json!({})).await;
-        assert_eq!(tools["tools"].as_array().unwrap().len(), 18);
+        assert_eq!(tools["tools"].as_array().unwrap().len(), 19);
 
         mgr.stop().await;
         let _ = std::fs::remove_dir_all(&dir);

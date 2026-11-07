@@ -115,6 +115,8 @@ pub(super) async fn read_loop<R: ByteSource, K: ByteSink + Sync>(
     // su 应答/宏下发的写半：su_watch 或 macro_pending 为 Some 时必为 Some（supervise 装配不变量）；
     // None 仅存在于测试 fake 装配
     writer: Option<&Arc<AnyWriter>>,
+    // AI 共享旁路：解码后的输出 tee 一份（不经信用闸，agent 读取不受 UI 背压影响）
+    tap: Option<&super::session::TapSlot>,
 ) {
     let mut agg: Vec<u8> = Vec::with_capacity(AGG_CAP);
     // 降权（PR-17 二期）：后台 tab 聚合窗 8ms → 500ms
@@ -165,9 +167,13 @@ pub(super) async fn read_loop<R: ByteSource, K: ByteSink + Sync>(
                                 su_watch = None; // 超窗解除武装
                             }
                         }
+                        let before = agg.len();
                         match decoder.as_mut() {
                             Some(dec) => dec.decode_append(&bytes, &mut agg),
                             None => agg.extend_from_slice(&bytes),
+                        }
+                        if let Some(slot) = tap {
+                            super::session::tee_tap(slot, &agg[before..]);
                         }
                         if agg.len() >= AGG_CAP {
                             flush(sink, &mut agg, credit, focused, ring).await;
@@ -369,7 +375,7 @@ mod tests {
             let ring = ring.clone();
             tokio::spawn(async move {
                 read_loop(
-                    &mut src, &sink, &credit, &focused, &ring, None, None, &mut None, None,
+                    &mut src, &sink, &credit, &focused, &ring, None, None, &mut None, None, None,
                 )
                 .await;
             })
@@ -388,6 +394,46 @@ mod tests {
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
+    }
+
+    /// AI 共享旁路：输出逐块 tee（不等聚合窗/信用），关闭后不再写入
+    #[tokio::test(start_paused = true)]
+    async fn tap_tees_output_until_closed() {
+        use super::super::session::{tee_tap, AgentTap, TapSlot};
+        let mut src = FakeSource::new(vec![
+            Some(Bytes::from_static(b"hello ")),
+            Some(Bytes::from_static(b"world")),
+        ]);
+        let sink = Arc::new(FakeSink::default());
+        let credit = Arc::new(CreditState::new(7));
+        let focused = Arc::new(AtomicBool::new(false));
+        let ring = Arc::new(RingBuf::new(4096));
+        let slot = TapSlot::default();
+        let tap = Arc::new(AgentTap::new());
+        *slot.lock() = Some(tap.clone());
+        let s2 = slot.clone();
+        let task = tokio::spawn(async move {
+            read_loop(
+                &mut src,
+                &sink,
+                &credit,
+                &focused,
+                &ring,
+                None,
+                None,
+                &mut None,
+                None,
+                Some(&s2),
+            )
+            .await;
+        });
+        settle().await;
+        let got: Vec<u8> = tap.out.lock().buf.iter().copied().collect();
+        assert_eq!(got, b"hello world");
+        tap.close();
+        tee_tap(&slot, b"late");
+        assert_eq!(tap.out.lock().total, 11, "关闭后不得再写入");
+        task.abort();
     }
 
     /// 慢滴：8ms 聚合窗未满不发帧，越窗才发（暂停时钟确定性）

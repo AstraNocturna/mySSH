@@ -145,6 +145,70 @@ pub(super) async fn send_macro(
     }
 }
 
+/// 用户键入后 agent 让出输入权的时长（用户优先：人在敲键盘时 AI 写入被拒）
+const USER_PRIORITY: Duration = Duration::from_millis(1500);
+
+/// AI 共享旁路（MCP terminal_* 驱动 UI 标签）：读循环把解码后的输出 tee 进有界缓冲，
+/// 用户输入刷新时间戳供输入仲裁。关闭（标签关闭/收回控制/MCP 停止）后读循环不再写入。
+pub(crate) struct AgentTap {
+    pub(crate) out: Arc<Mutex<crate::mcp_terminal::TermBuf>>,
+    last_user_input: Mutex<Option<Instant>>,
+}
+
+impl AgentTap {
+    pub(crate) fn new() -> Self {
+        Self {
+            out: Arc::new(Mutex::new(crate::mcp_terminal::TermBuf::default())),
+            last_user_input: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.out.lock().closed
+    }
+
+    pub(crate) fn close(&self) {
+        self.out.lock().closed = true;
+    }
+
+    pub(crate) fn user_active(&self, now: Instant) -> bool {
+        self.last_user_input
+            .lock()
+            .is_some_and(|t| now.duration_since(t) < USER_PRIORITY)
+    }
+
+    pub(crate) fn mark_user_input_at(&self, now: Instant) {
+        *self.last_user_input.lock() = Some(now);
+    }
+
+    fn tee(&self, data: &[u8]) {
+        let mut b = self.out.lock();
+        if !b.closed {
+            b.append(data);
+        }
+    }
+}
+
+/// 标签的旁路槽：TermSession 与 SuperviseCtx 共享，跨自动重连保留
+pub(super) type TapSlot = Arc<Mutex<Option<Arc<AgentTap>>>>;
+
+/// 标签终结：旁路置关闭（agent 侧 read 返回 closed、send 报错）
+pub(super) fn close_tap(slot: &TapSlot) {
+    if let Some(t) = slot.lock().take() {
+        t.close();
+    }
+}
+
+/// 读循环 tee 点：仅在挂了未关闭旁路时拷贝
+pub(super) fn tee_tap(slot: &TapSlot, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+    if let Some(t) = slot.lock().as_ref() {
+        t.tee(data);
+    }
+}
+
 pub(super) struct TermSession {
     /// 重连时整枚替换（sessions 锁内 swap）
     pub(super) writer: Arc<AnyWriter>,
@@ -161,7 +225,18 @@ pub(super) struct TermSession {
     pub(super) focused: Arc<AtomicBool>,
     /// 后台输出环形缓冲（C11：截断可观测，回前台回放）
     pub(super) ring: Arc<RingBuf>,
+    /// AI 共享旁路（None = 未共享）
+    pub(super) tap: TapSlot,
     pub(super) task: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl TermSession {
+    /// UI 输入（键盘/粘贴/广播）到达：刷新旁路的用户输入时间戳
+    pub(super) fn mark_user_input(&self) {
+        if let Some(t) = self.tap.lock().as_ref() {
+            t.mark_user_input_at(Instant::now());
+        }
+    }
 }
 
 /// 重连退避：1/2/4/8/16s 封顶 + equal jitter（防多会话断线后同步重连）
@@ -237,6 +312,7 @@ pub(super) struct SuperviseCtx {
     /// 前台标记与 ring（PR-17 二期；与 TermSession 共享 Arc）
     pub(super) focused: Arc<AtomicBool>,
     pub(super) ring: Arc<RingBuf>,
+    pub(super) tap: TapSlot,
     pub(super) reader: AnyReader,
 }
 
@@ -302,6 +378,7 @@ pub(super) async fn supervise(mut ctx: SuperviseCtx) {
             su_watch.as_mut(),
             &mut macro_pending,
             Some(&ctx.writer),
+            Some(&ctx.tap),
         )
         .await;
 
@@ -319,6 +396,7 @@ pub(super) async fn supervise(mut ctx: SuperviseCtx) {
                 &crate::wire::SessionStateFrame::closed(&ctx.tab_id),
             ));
             ctx.mgr.sessions.lock().remove(&ctx.tab_id);
+            close_tap(&ctx.tap);
             stop_session_tunnels_if_last(&ctx);
             return;
         }
@@ -331,6 +409,7 @@ pub(super) async fn supervise(mut ctx: SuperviseCtx) {
                     &crate::wire::SessionStateFrame::closed(&ctx.tab_id),
                 ));
                 ctx.mgr.sessions.lock().remove(&ctx.tab_id);
+                close_tap(&ctx.tap);
                 stop_session_tunnels_if_last(&ctx);
                 return;
             }

@@ -69,6 +69,7 @@ pub fn run() {
     let mcp_manager = mcp::McpManager::new();
     let mcp_terms = mcp_terminal::McpTerminalState::new();
     let mcp_ui_hub = mcp_ui::McpUiHub::new();
+    let term_mgr = Arc::new(TerminalManager::default());
     // 会话变更失效扇出：命令只发事件，消费方在此登记（隧道/ctx 池）
     lifecycle::wire(
         &session_state.events,
@@ -83,7 +84,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(TerminalManager::default()))
+        .manage(term_mgr.clone())
         .manage(session_state.clone())
         .manage(tunnel_mgr_state.clone())
         .manage(sftp_state.clone())
@@ -115,6 +116,7 @@ pub fn run() {
                 exec: exec_state.clone(),
                 terms: mcp_terms.clone(),
                 ui: mcp_ui_hub.clone(),
+                term_mgr: term_mgr.clone(),
             };
             tauri::async_runtime::spawn(async move {
                 crate::mcp::boot_from_settings(mcp_manager, deps).await;
@@ -209,6 +211,9 @@ pub fn run() {
             mcp::mcp_restart,
             mcp_ui::mcp_ui_subscribe,
             mcp_ui::mcp_approve,
+            mcp_ui::mcp_agent_tab_ready,
+            mcp_terminal::mcp_share_tab,
+            mcp_terminal::mcp_unshare_tab,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

@@ -45,7 +45,7 @@
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | 远端写入与元操作（落审计） |
 | `sftp_upload` / `sftp_download` | 文件传输：入队后台传输队列执行（与 UI 传输面板共享，**无大小上限**；`wait_seconds` 可同步等待终态） |
 | `sftp_transfer_list` | 查询传输进度 / 状态 / 错误 |
-| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略） |
+| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` / `terminal_list` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互。窗口在线时以普通标签打开，可旁观、你键入时 AI 暂停写入、右键随时收回控制；也可右键把已有标签「共享给 AI」（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略） |
 
 **权限模型**（按 会话 → 最近的分组 → 全局 解析）：
 
