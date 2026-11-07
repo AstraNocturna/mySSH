@@ -173,7 +173,7 @@ export const zhDialogs = {
   'dialogs.mcpConfigCopied': '{agent} 配置已复制',
   'dialogs.mcpToolPerms': '工具权限',
   'dialogs.mcpAllowListSessions': 'list_sessions（列会话档案）',
-  'dialogs.mcpAllowSshExec': 'ssh_exec（远程执行命令）',
+  'dialogs.mcpAllowSshExec': 'ssh_exec / job_*（远程执行命令、后台命令）',
   'dialogs.mcpAllowSftpRead': 'SFTP 读取（列目录/读文件）',
   'dialogs.mcpAllowSftpWrite': 'SFTP 写入（写/删/改远端）',
   'dialogs.diagSection': '诊断',

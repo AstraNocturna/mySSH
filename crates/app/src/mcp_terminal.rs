@@ -41,7 +41,7 @@ pub(crate) struct TermBuf {
     /// 累计写入字节数（只增）
     pub(crate) total: u64,
     /// 曾因容量超界丢弃过最旧数据（旧 offset 可能已失效）
-    truncated: bool,
+    pub(crate) truncated: bool,
     /// 读任务 EOF/Close、terminal_close、UI 标签关闭或收回控制后置位
     pub(crate) closed: bool,
 }
@@ -59,7 +59,7 @@ impl TermBuf {
     }
 
     /// 缓冲中最早可用字节的全局 offset
-    fn start(&self) -> u64 {
+    pub(crate) fn start(&self) -> u64 {
         self.total - self.buf.len() as u64
     }
 }

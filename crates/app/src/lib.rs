@@ -13,8 +13,10 @@ mod local_pty;
 mod logging;
 mod mcp;
 mod mcp_files;
+mod mcp_jobs;
 mod mcp_policy;
 mod mcp_terminal;
+mod mcp_text;
 mod mcp_ui;
 mod monitor;
 mod perf;
@@ -69,6 +71,7 @@ pub fn run() {
     let monitor_state = monitor::MonitorState::new();
     let mcp_manager = mcp::McpManager::new();
     let mcp_terms = mcp_terminal::McpTerminalState::new();
+    let mcp_jobs = mcp_jobs::McpJobs::new();
     let mcp_ui_hub = mcp_ui::McpUiHub::new();
     let term_mgr = Arc::new(TerminalManager::default());
     let ai_backups = mcp_files::BackupStore::new(mcp_files::BackupStore::default_root());
@@ -94,6 +97,7 @@ pub fn run() {
         .manage(monitor_state)
         .manage(mcp_manager.clone())
         .manage(mcp_terms.clone())
+        .manage(mcp_jobs.clone())
         .manage(mcp_ui_hub.clone())
         .manage(ai_backups.clone())
         .setup(move |app| {
@@ -121,6 +125,7 @@ pub fn run() {
                 ui: mcp_ui_hub.clone(),
                 term_mgr: term_mgr.clone(),
                 backups: ai_backups.clone(),
+                jobs: mcp_jobs.clone(),
             };
             tauri::async_runtime::spawn(async move {
                 crate::mcp::boot_from_settings(mcp_manager, deps).await;

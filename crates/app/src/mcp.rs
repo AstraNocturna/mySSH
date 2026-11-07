@@ -110,7 +110,8 @@ impl Default for McpPerms {
 fn tool_group_key(name: &str) -> Option<&'static str> {
     match name {
         "list_sessions" => Some("list_sessions"),
-        "ssh_exec" => Some("ssh_exec"),
+        // 后台命令执行的同样是任意命令：与 ssh_exec 同组
+        "ssh_exec" | "job_start" | "job_read" | "job_stop" | "job_list" => Some("ssh_exec"),
         "terminal_open" | "terminal_send" | "terminal_read" | "terminal_close"
         | "terminal_list" => Some("terminal"),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "file_view" | "file_grep"
@@ -151,7 +152,11 @@ async fn tool_allowed(st: &ServerState, name: &str, args: &Value) -> bool {
             .get("terminalId")
             .and_then(Value::as_str)
             .and_then(|id| st.terms.session_of(id))
-        {
+            .or_else(|| {
+                args.get("job_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| st.jobs.session_of(id))
+            }) {
             Some(s) => s,
             None => return global,
         },
@@ -311,6 +316,8 @@ pub struct McpDeps {
     pub term_mgr: Arc<crate::terminal::TerminalManager>,
     /// AI 文件改动备份（回滚用）
     pub backups: Arc<crate::mcp_files::BackupStore>,
+    /// 后台命令注册表
+    pub jobs: Arc<crate::mcp_jobs::McpJobs>,
 }
 
 /// MCP 服务生命周期管理：持有 tokio task + shutdown watch
@@ -329,6 +336,8 @@ struct McpInner {
     terms: Option<Arc<crate::mcp_terminal::McpTerminalState>>,
     /// 前端交互枢纽（stop 时通知前端摘除 AI 控制标记）
     ui: Option<Arc<crate::mcp_ui::McpUiHub>>,
+    /// 后台命令注册表（stop 时终止全部运行中的命令）
+    jobs: Option<Arc<crate::mcp_jobs::McpJobs>>,
 }
 
 impl McpManager {
@@ -354,6 +363,7 @@ impl McpManager {
             ui,
             term_mgr,
             backups,
+            jobs,
         } = deps;
         let state = Arc::new(ServerState {
             store,
@@ -363,6 +373,7 @@ impl McpManager {
             ui: ui.clone(),
             term_mgr,
             backups,
+            jobs: jobs.clone(),
             token: token.clone(),
             perms,
             // 安全模型执行面（M0 只读档）：判定管线 + 每会话速率闸，随服务同生命周期
@@ -401,13 +412,14 @@ impl McpManager {
         inner.token = token;
         inner.terms = Some(terms);
         inner.ui = Some(ui);
+        inner.jobs = Some(jobs);
         tracing::info!(port, "MCP 服务已启动（127.0.0.1）");
         Ok(())
     }
 
     /// 停止服务：先发 shutdown 信号走优雅退出，超过 STOP_GRACE 则 abort
     pub async fn stop(&self) {
-        let (tx, task, terms, ui) = {
+        let (tx, task, terms, ui, jobs) = {
             let mut inner = self.inner.lock();
             inner.port = 0;
             (
@@ -415,8 +427,12 @@ impl McpManager {
                 inner.task.take(),
                 inner.terms.take(),
                 inner.ui.take(),
+                inner.jobs.take(),
             )
         };
+        if let Some(jobs) = jobs {
+            jobs.stop_all().await;
+        }
         // 交互式终端清场：关通道 + abort 读任务，不留孤儿 Bulk 连接；UI 标签只收回控制
         if let Some(terms) = terms {
             for tab in terms.close_all().await {
@@ -502,6 +518,7 @@ pub async fn mcp_restart(
     ui: tauri::State<'_, Arc<crate::mcp_ui::McpUiHub>>,
     term_mgr: tauri::State<'_, Arc<crate::terminal::TerminalManager>>,
     backups: tauri::State<'_, Arc<crate::mcp_files::BackupStore>>,
+    jobs: tauri::State<'_, Arc<crate::mcp_jobs::McpJobs>>,
 ) -> Result<Value, String> {
     let deps = McpDeps {
         store: sessions.store.clone(),
@@ -511,6 +528,7 @@ pub async fn mcp_restart(
         ui: ui.inner().clone(),
         term_mgr: term_mgr.inner().clone(),
         backups: backups.inner().clone(),
+        jobs: jobs.inner().clone(),
     };
     restart_from_settings(&state, deps).await
 }
@@ -529,6 +547,8 @@ struct ServerState {
     term_mgr: Arc<crate::terminal::TerminalManager>,
     /// AI 文件改动备份（file_edit / sftp_write / sftp_delete 前落盘，file_rollback 恢复）
     backups: Arc<crate::mcp_files::BackupStore>,
+    /// 后台命令（job_*；命令门同 ssh_exec）
+    jobs: Arc<crate::mcp_jobs::McpJobs>,
     token: String,
     /// 工具分组权限（启动时快照；改设置后 mcp_restart 生效）
     perms: McpPerms,
@@ -730,6 +750,59 @@ fn tools_list(perms: &McpPerms) -> Value {
                         }
                     },
                     "required": ["session_id", "command"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "job_start",
+                "description": "在已保存的 SSH 会话上后台启动一条长时间运行的命令（构建、tail -f、长下载等），立即返回 jobId，不等待结束。命令门与 ssh_exec 相同（需确认时返回 status=pending_approval，用相同参数重调继续等待）。每会话最多 3 个运行中任务。输出用 job_read 分段读取，job_stop 停止。仅 SSH 会话。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "会话档案 id（list_sessions 返回的 id）" },
+                        "command": { "type": "string", "description": "要在远端后台执行的 shell 命令" },
+                        "pty": { "type": "boolean", "default": true, "description": "分配伪终端（TERM=dumb）：job_stop 时远端进程能收到挂断；false 则 stdout/stderr 原样不经终端" }
+                    },
+                    "required": ["session_id", "command"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "job_read",
+                "description": "按字节游标分段读取后台任务输出。首次 offset=0，之后传上次返回的 nextOffset；more=true 表示还有已缓冲未读的输出。默认剥离 ANSI 控制序列并折叠进度条刷新。缓冲上限内最旧输出会被丢弃（truncated=true）。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "job_start 返回的 jobId" },
+                        "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "起始字节游标" },
+                        "max_bytes": { "type": "integer", "minimum": 1, "maximum": 262144, "default": 16384, "description": "本次最多读取的原始字节数" },
+                        "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 60, "default": 0, "description": "无新输出且任务未结束时最多等待的秒数" },
+                        "strip_ansi": { "type": "boolean", "default": true, "description": "剥离 ANSI/OSC 控制序列" }
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "job_stop",
+                "description": "停止后台任务（发 TERM 信号并关闭通道），返回任务最终状态。已结束的任务直接返回状态。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "job_start 返回的 jobId" }
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "job_list",
+                "description": "列出后台任务（含已结束的最近任务）：jobId、会话、命令、状态、退出码、已输出字节数，按启动时间倒序。",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "description": "仅列出该会话的任务" }
+                    },
                     "additionalProperties": false
                 }
             },
@@ -1074,7 +1147,10 @@ fn tool_annotations(name: &str) -> Value {
         "list_sessions" => (true, false, true, false),
         "sftp_home" | "sftp_list" | "sftp_stat" | "sftp_read" | "sftp_transfer_list"
         | "terminal_read" => (true, false, true, true),
-        "terminal_list" | "file_backups" => (true, false, true, false),
+        "terminal_list" | "file_backups" | "job_list" => (true, false, true, false),
+        "job_read" => (true, false, true, true),
+        "job_start" => (false, true, false, true),
+        "job_stop" => (false, true, true, true),
         "file_view" | "file_grep" | "file_glob" => (true, false, true, true),
         "file_edit" | "file_rollback" => (false, true, false, true),
         "ssh_exec" | "terminal_send" => (false, true, false, true),
@@ -1118,6 +1194,10 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
             Err(e) => err_content(e),
         },
         "ssh_exec" => match ssh_exec_tool(st, args).await {
+            Ok(text) => ok_content(text),
+            Err(e) => err_content(e),
+        },
+        n if n.starts_with("job_") => match job_tool(st, n, args).await {
             Ok(text) => ok_content(text),
             Err(e) => err_content(e),
         },
@@ -1199,57 +1279,8 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
         .unwrap_or(DEFAULT_TIMEOUT_MS)
         .clamp(1, MAX_TIMEOUT_MS);
 
-    // 安全模型第 6 条：每会话命令速率上限（拒绝也计数，防探测洪泛）
-    if let Err(e) = st.rate.check(session_id) {
-        mcp_audit(
-            st,
-            session_id,
-            "mcp_ssh_exec",
-            &json!({ "command": command, "result": "rate_limited" }),
-        )
-        .await;
-        return Err(format!("MCP 速率限制：{e}"));
-    }
-    // 安全模型第 1/2 条：按会话有效档位/生产标记（会话 → 分组 → 全局）判定；
-    // 需人工确认的命令走应用内审批弹窗，窗口不可用时 fail-closed 拒绝。
-    // 门在会话解析之前：被拒绝的命令不触网、不建连。
-    let rec = store.sessions().get(session_id).await.ok();
-    let eff = session_effective(st, rec.as_ref()).await;
-    let level = crate::mcp_policy::level_str(eff.level);
-    let deny_reason = match st.policy.classify(command, eff.level, eff.production) {
-        Verdict::Allow => None,
-        Verdict::Deny => Some(format!("命令超出只读白名单（当前为 {level} 档）")),
-        Verdict::RequireConfirmation => {
-            match confirm_exec(st, session_id, rec.as_ref(), command, &eff).await {
-                Confirm::Approved => None,
-                Confirm::Denied(reason) => Some(reason),
-                Confirm::Pending(id) => {
-                    mcp_audit(
-                        st,
-                        session_id,
-                        "mcp_ssh_exec",
-                        &json!({ "command": command, "result": "pending", "approvalId": id }),
-                    )
-                    .await;
-                    return serde_json::to_string_pretty(&json!({
-                        "status": "pending_approval",
-                        "approvalId": id,
-                        "message": "命令需用户在 mySSH 窗口中确认，用户尚未决定。请用完全相同的 session_id 与 command 再次调用 ssh_exec 继续等待；勿改写命令绕过确认。",
-                    }))
-                    .map_err(|e| e.to_string());
-                }
-            }
-        }
-    };
-    if let Some(reason) = deny_reason {
-        mcp_audit(
-            st,
-            session_id,
-            "mcp_ssh_exec",
-            &json!({ "command": command, "result": "rejected", "reason": reason }),
-        )
-        .await;
-        return Err(format!("MCP 安全策略拒绝执行：{reason}"));
+    if let Gate::Pending(resp) = exec_gate(st, session_id, command, "ssh_exec").await? {
+        return Ok(resp);
     }
 
     let target = crate::sessions::resolve_session_target(store, session_id).await?;
@@ -1292,6 +1323,120 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
     }
 }
 
+enum Gate {
+    /// 放行，继续执行
+    Go,
+    /// 等待用户审批：直接把这段 JSON 返回给 agent
+    Pending(String),
+}
+
+/// 命令门（ssh_exec 与 job_start 共用）：速率闸 → 分类器 → 必要时审批弹窗。
+/// 拒绝返回 Err；门在会话解析之前，被拒绝的命令不触网、不建连。
+async fn exec_gate(
+    st: &ServerState,
+    session_id: &str,
+    command: &str,
+    tool: &str,
+) -> Result<Gate, String> {
+    let action = format!("mcp_{tool}");
+    // 安全模型第 6 条：每会话命令速率上限（拒绝也计数，防探测洪泛）
+    if let Err(e) = st.rate.check(session_id) {
+        mcp_audit(
+            st,
+            session_id,
+            &action,
+            &json!({ "command": command, "result": "rate_limited" }),
+        )
+        .await;
+        return Err(format!("MCP 速率限制：{e}"));
+    }
+    // 安全模型第 1/2 条：按会话有效档位/生产标记（会话 → 分组 → 全局）判定；
+    // 需人工确认的命令走应用内审批弹窗，窗口不可用时 fail-closed 拒绝。
+    let rec = st.store.sessions().get(session_id).await.ok();
+    let eff = session_effective(st, rec.as_ref()).await;
+    let level = crate::mcp_policy::level_str(eff.level);
+    let deny_reason = match st.policy.classify(command, eff.level, eff.production) {
+        Verdict::Allow => None,
+        Verdict::Deny => Some(format!("命令超出只读白名单（当前为 {level} 档）")),
+        Verdict::RequireConfirmation => {
+            match confirm_exec(st, session_id, rec.as_ref(), command, &eff, &action).await {
+                Confirm::Approved => None,
+                Confirm::Denied(reason) => Some(reason),
+                Confirm::Pending(id) => {
+                    mcp_audit(
+                        st,
+                        session_id,
+                        &action,
+                        &json!({ "command": command, "result": "pending", "approvalId": id }),
+                    )
+                    .await;
+                    let resp = serde_json::to_string_pretty(&json!({
+                        "status": "pending_approval",
+                        "approvalId": id,
+                        "message": format!("命令需用户在 mySSH 窗口中确认，用户尚未决定。请用完全相同的 session_id 与 command 再次调用 {tool} 继续等待；勿改写命令绕过确认。"),
+                    }))
+                    .map_err(|e| e.to_string())?;
+                    return Ok(Gate::Pending(resp));
+                }
+            }
+        }
+    };
+    if let Some(reason) = deny_reason {
+        mcp_audit(
+            st,
+            session_id,
+            &action,
+            &json!({ "command": command, "result": "rejected", "reason": reason }),
+        )
+        .await;
+        return Err(format!("MCP 安全策略拒绝执行：{reason}"));
+    }
+    Ok(Gate::Go)
+}
+
+/// job_* 分发：job_start 先过命令门，再在 Exec Transport 上开通道
+async fn job_tool(st: &ServerState, name: &str, args: &Value) -> Result<String, String> {
+    match name {
+        "job_start" => {
+            let session_id = req_str(args, "session_id", name)?;
+            let command = req_str(args, "command", name)?;
+            let pty = args.get("pty").and_then(Value::as_bool).unwrap_or(true);
+            if let Gate::Pending(resp) = exec_gate(st, session_id, command, name).await? {
+                return Ok(resp);
+            }
+            let target = crate::sessions::resolve_session_target(&st.store, session_id).await?;
+            if matches!(target, crate::sessions::ResolvedTarget::Local(_)) {
+                return Err("本地会话不支持 job_start（仅 SSH 会话）".into());
+            }
+            let ctx = crate::exec::ensure_exec_ctx(&st.exec, &st.store, session_id).await?;
+            let res =
+                crate::mcp_jobs::job_start(&st.jobs, &st.store, ctx, session_id, command, pty)
+                    .await;
+            let detail = match &res {
+                Ok(body) => json!({ "command": command, "result": "started", "detail": body }),
+                Err(e) => json!({ "command": command, "result": "error", "error": e }),
+            };
+            mcp_audit(st, session_id, "mcp_job_start", &detail).await;
+            res
+        }
+        "job_read" => crate::mcp_jobs::job_read(&st.jobs, args).await,
+        "job_stop" => {
+            let res = crate::mcp_jobs::job_stop(&st.jobs, args).await;
+            if let (Ok(body), Some(sid)) = (
+                &res,
+                args.get("job_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| st.jobs.session_of(id)),
+            ) {
+                mcp_audit(st, &sid, "mcp_job_stop", &json!({ "detail": body })).await;
+            }
+            res
+        }
+        "job_list" => Ok(crate::mcp_jobs::job_list(&st.jobs, args)),
+        other => Err(format!("未知工具：{other}")),
+    }
+}
+
 /// ssh_exec 单次调用内等待用户审批的时长；未决返回 pending，agent 重试续等
 const APPROVAL_WAIT: Duration = Duration::from_secs(60);
 
@@ -1326,6 +1471,7 @@ async fn confirm_exec(
     rec: Option<&core_store::SessionRecord>,
     command: &str,
     eff: &crate::mcp_policy::Effective,
+    action: &str,
 ) -> Confirm {
     // 会话不存在不弹窗：用户无从判断，且后续解析必然失败
     let Some(rec) = rec else {
@@ -1347,7 +1493,7 @@ async fn confirm_exec(
             mcp_audit(
                 st,
                 session_id,
-                "mcp_ssh_exec",
+                action,
                 &json!({ "command": command, "result": "approved", "approvalId": id }),
             )
             .await;
@@ -1858,10 +2004,10 @@ mod tests {
                 .filter_map(|t| t["name"].as_str())
                 .collect()
         }
-        assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 20);
+        assert_eq!(names_of(&tools_list(&McpPerms::default())).len(), 24);
         let all = tools_list(&all_perms());
         let names = names_of(&all);
-        assert_eq!(names.len(), 25);
+        assert_eq!(names.len(), 29);
         // file_* 跟随 sftp_read / sftp_write 权限组
         let ro = McpPerms {
             sftp_write: false,
@@ -1887,6 +2033,7 @@ mod tests {
         let filtered = tools_list(&p);
         let names = names_of(&filtered);
         assert!(!names.contains(&"ssh_exec"));
+        assert!(!names.contains(&"job_start") && !names.contains(&"job_read"));
         assert!(!names.contains(&"sftp_upload"));
         assert!(!names.contains(&"sftp_download"));
         assert!(!names.contains(&"sftp_transfer_list"));
@@ -2001,6 +2148,7 @@ mod tests {
             backups: crate::mcp_files::BackupStore::new(
                 std::env::temp_dir().join(format!("myssh-mcp-bk-{}", std::process::id())),
             ),
+            jobs: crate::mcp_jobs::McpJobs::new(),
             token: String::new(),
             perms: all_perms(),
             policy: PolicyEngine::new(),
@@ -2105,6 +2253,7 @@ mod tests {
             backups: crate::mcp_files::BackupStore::new(
                 std::env::temp_dir().join(format!("myssh-mcp-bk-{}", std::process::id())),
             ),
+            jobs: crate::mcp_jobs::McpJobs::new(),
         };
         mgr.start(
             deps,
@@ -2173,7 +2322,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 400);
         let tools = rpc(&url, "tools/list", json!({})).await;
-        assert_eq!(tools["tools"].as_array().unwrap().len(), 25);
+        assert_eq!(tools["tools"].as_array().unwrap().len(), 29);
 
         mgr.stop().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -2300,6 +2449,39 @@ mod tests {
         let (_, is_err) = call_text(&url, "terminal_close", json!({ "terminalId": term_id })).await;
         assert!(!is_err, "terminal_close 报错");
 
+        // job_* 往返：后台启动 → 游标读到结束 → job_list 可见
+        let (text, is_err) = call_text(
+            &url,
+            "job_start",
+            json!({ "session_id": "e2e", "command": "echo job-e2e-ok", "pty": false }),
+        )
+        .await;
+        assert!(!is_err, "job_start 报错: {text}");
+        let job_id = serde_json::from_str::<Value>(&text).unwrap()["jobId"]
+            .as_str()
+            .expect("job_start 未返回 jobId")
+            .to_string();
+        let (mut out, mut offset, mut status) = (String::new(), 0u64, String::new());
+        for _ in 0..10 {
+            let (text, is_err) = call_text(
+                &url,
+                "job_read",
+                json!({ "job_id": job_id, "offset": offset, "wait_seconds": 5 }),
+            )
+            .await;
+            assert!(!is_err, "job_read 报错: {text}");
+            let v = serde_json::from_str::<Value>(&text).unwrap();
+            offset = v["nextOffset"].as_u64().unwrap();
+            out.push_str(v["data"].as_str().unwrap_or(""));
+            status = v["status"].as_str().unwrap_or("").to_string();
+            if status != "running" && !v["more"].as_bool().unwrap_or(false) {
+                break;
+            }
+        }
+        assert!(out.contains("job-e2e-ok"), "job 输出缺 marker: {out:?}");
+        assert_eq!(status, "exited");
+        let (text, _) = call_text(&url, "job_list", json!({ "session_id": "e2e" })).await;
+        assert!(text.contains(&job_id), "job_list 缺任务: {text}");
         // file_* 往返：新建 → 查看 → 编辑 → grep/glob → 回滚编辑 → 回滚新建（删除）
         let call = |name: &'static str, args: Value| {
             let url = url.clone();
