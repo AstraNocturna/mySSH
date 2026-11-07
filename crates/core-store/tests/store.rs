@@ -241,6 +241,69 @@ async fn audit_prune_older_than() {
     let (rest, _) = audit.query(None, 100).await.expect("query");
     assert_eq!(rest.len(), 2, "新记录保留");
     assert!(rest.iter().all(|r| r.detail["i"].as_i64() >= Some(2)));
+    let chain = audit.verify_chain().await.expect("verify");
+    assert!(chain.ok, "按保留策略删掉最旧行不算断裂: {chain:?}");
+    assert_eq!(chain.checked, 2);
+}
+
+#[tokio::test]
+async fn audit_hash_chain_detects_tampering() {
+    let path = temp_db("auditchain");
+    let store = Store::open(&path).await.expect("open");
+    let audit = store.audit();
+    for i in 0..5 {
+        audit
+            .append(
+                Actor::Mcp,
+                None,
+                "recording_finished",
+                &serde_json::json!({ "id": format!("r{i}"), "sha256": "x" }),
+            )
+            .await
+            .expect("append");
+    }
+    let ok = audit.verify_chain().await.expect("verify");
+    assert_eq!((ok.ok, ok.checked, ok.legacy), (true, 5, 0));
+    let found = audit
+        .find_by_detail_id("recording_finished", "r3")
+        .await
+        .expect("find")
+        .expect("应找到");
+    assert_eq!(found.detail["id"], "r3");
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display()))
+        .await
+        .expect("connect");
+    // 改内容：该行哈希不再吻合
+    sqlx::query("UPDATE audit SET detail = '{\"id\":\"r1\",\"sha256\":\"forged\"}' WHERE id = 2")
+        .execute(&pool)
+        .await
+        .expect("tamper");
+    let bad = audit.verify_chain().await.expect("verify");
+    assert!(!bad.ok);
+    assert_eq!(bad.first_bad_id, Some(2));
+
+    // 删中间行：后一行的 prev_hash 接不上
+    let path2 = temp_db("auditchain2");
+    let store2 = Store::open(&path2).await.expect("open");
+    for i in 0..3 {
+        store2
+            .audit()
+            .append(Actor::Gui, Some("s"), "a", &serde_json::json!({ "i": i }))
+            .await
+            .expect("append");
+    }
+    let pool2 = sqlx::SqlitePool::connect(&format!("sqlite:{}", path2.display()))
+        .await
+        .expect("connect");
+    sqlx::query("DELETE FROM audit WHERE id = 2")
+        .execute(&pool2)
+        .await
+        .expect("delete");
+    let bad = store2.audit().verify_chain().await.expect("verify");
+    assert_eq!((bad.ok, bad.first_bad_id), (false, Some(3)));
+    pool.close().await;
+    pool2.close().await;
 }
 
 #[tokio::test]
