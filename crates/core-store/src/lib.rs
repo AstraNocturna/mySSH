@@ -22,7 +22,7 @@ use std::path::Path;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::SqlitePool;
 
-pub use audit::{Actor, AuditRecord, AuditRepo};
+pub use audit::{Actor, AuditRecord, AuditRepo, ChainReport};
 pub use cred::{CredentialKind, CredentialStore, VaultStatus};
 pub use error::StoreError;
 pub use export::{export_encrypted, export_plain, import_config, ConfigImportOutcome};
@@ -54,6 +54,8 @@ impl std::fmt::Debug for Secret {
 
 pub struct Store {
     pool: SqlitePool,
+    /// 审计哈希链的 append 串行锁（所有 AuditRepo 共享）
+    audit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Store {
@@ -80,7 +82,10 @@ impl Store {
             .run(&pool)
             .await
             .map_err(|e| StoreError::Migration(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            audit_lock: Default::default(),
+        })
     }
 
     /// 事务入口（配置导入批量写入用）：调用方 begin 后传给各 Repo 的 `_tx` 变体
@@ -97,7 +102,7 @@ impl Store {
     }
 
     pub fn audit(&self) -> AuditRepo {
-        AuditRepo::new(self.pool.clone())
+        AuditRepo::new(self.pool.clone(), self.audit_lock.clone())
     }
 
     pub fn tunnels(&self) -> TunnelRepo {
