@@ -21,6 +21,7 @@ export function TabBar() {
   const moveTab = useAppStore((s) => s.moveTab);
   const bellTabs = useAppStore((s) => s.bellTabs);
   const sessions = useAppStore((s) => s.sessions);
+  const aiTabs = useAppStore((s) => s.aiTabs);
 
   /** 标签右键菜单（批次四 10.3） */
   const [menu, setMenu] = useState<{ x: number; y: number; tab: Tab } | null>(null);
@@ -112,6 +113,9 @@ export function TabBar() {
     <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-800 bg-neutral-900 px-2 py-1">
       {tabs.map((t) => {
         const pane = t.panes[t.activePaneId];
+        const aiKind = Object.values(t.panes)
+          .map((p) => (p.session.tabId ? aiTabs[p.session.tabId] : undefined))
+          .find((k) => k !== undefined);
         // 标签颜色点：session 标签从 sessions 列表取 record.color；本地终端等无关联会话不渲染
         const tabSessionId = t.target.kind === 'session' ? t.target.sessionId : null;
         const sessionColor = tabSessionId
@@ -162,6 +166,14 @@ export function TabBar() {
           >
             <span className={`h-1.5 w-1.5 rounded-full ${STATE_DOT[pane?.state ?? ''] ?? ''}`} />
             <span className="max-w-40 truncate">{t.title}</span>
+            {aiKind && (
+              <span
+                className="rounded bg-purple-600/70 px-1 text-[10px] leading-4 text-white"
+                title={tr(aiKind === 'agent' ? 'chrome.aiAgentTitle' : 'chrome.aiSharedTitle')}
+              >
+                AI
+              </span>
+            )}
             {/* 12.6：bell 待读标记（非活跃标签收到 BEL；激活即清，静态点无动画） */}
             {bellTabs.includes(t.id) && (
               <span

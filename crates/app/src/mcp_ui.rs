@@ -1,4 +1,4 @@
-//! MCP ↔ 前端交互枢纽：危险命令的应用内审批（弹窗 + pending）。
+//! MCP ↔ 前端交互枢纽：危险命令的应用内审批（弹窗 + pending）、agent 终端以 UI 标签打开。
 //!
 //! 前端启动时经 `mcp_ui_subscribe` 挂一条事件通道；ssh_exec 判定为需人工确认时
 //! 推 `approval_request` 帧，用户在弹窗里批准/拒绝（`mcp_approve`）。agent 侧同步
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 /// 审批项存活上限：超时未决即拒绝，前端弹窗按同一时长自动关闭
 pub(crate) const APPROVAL_TTL: Duration = Duration::from_secs(300);
@@ -35,10 +35,20 @@ struct Approval {
     deadline: Instant,
 }
 
+/// 前端开标签的结果：Ok(后端 tabId) / Err(连接失败原因)
+type TabResult = Result<String, String>;
+
 #[derive(Default)]
 pub struct McpUiHub {
     sink: Mutex<Option<UiSink>>,
     approvals: Mutex<HashMap<String, Approval>>,
+    /// agent terminal_open 请前端开标签：requestId → 结果回传
+    tab_waiters: Mutex<HashMap<String, oneshot::Sender<TabResult>>>,
+}
+
+fn random_id() -> String {
+    let bytes: [u8; 8] = rand::random();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 impl McpUiHub {
@@ -94,8 +104,7 @@ impl McpUiHub {
                 "需人工确认，但 mySSH 窗口审批通道不可用（请保持 mySSH 主窗口打开）".into(),
             );
         }
-        let bytes: [u8; 8] = rand::random();
-        let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let id = random_id();
         let (tx, _rx) = watch::channel(None);
         self.approvals.lock().insert(
             id.clone(),
@@ -160,6 +169,39 @@ impl McpUiHub {
         ApprovalWait::Pending(id.to_string())
     }
 
+    /// 请前端为 agent 开一个普通终端标签；连上后前端经 mcp_agent_tab_ready 回传 tabId
+    pub(crate) fn request_tab(
+        &self,
+        session_id: &str,
+        session_name: &str,
+    ) -> Result<(String, oneshot::Receiver<TabResult>), String> {
+        let id = random_id();
+        let (tx, rx) = oneshot::channel();
+        self.tab_waiters.lock().insert(id.clone(), tx);
+        let sent = self.emit(&json!({
+            "type": "agent_terminal_open",
+            "requestId": id,
+            "sessionId": session_id,
+            "sessionName": session_name,
+        }));
+        if !sent {
+            self.tab_waiters.lock().remove(&id);
+            return Err("mySSH 窗口不可用，无法以标签打开终端".into());
+        }
+        Ok((id, rx))
+    }
+
+    pub(crate) fn cancel_tab(&self, id: &str) {
+        self.tab_waiters.lock().remove(id);
+    }
+
+    fn resolve_tab(&self, id: &str, result: TabResult) -> bool {
+        match self.tab_waiters.lock().remove(id) {
+            Some(tx) => tx.send(result).is_ok(),
+            None => false,
+        }
+    }
+
     /// 用户决定；未知/已过期审批项返回 false
     pub(crate) fn decide(&self, id: &str, allow: bool) -> bool {
         let map = self.approvals.lock();
@@ -191,6 +233,21 @@ pub async fn mcp_approve(
     allow: bool,
 ) -> Result<bool, String> {
     Ok(hub.decide(&id, allow))
+}
+
+/// 前端为 agent 开的标签已连上（tabId）或失败（error）；返回 false = 请求已超时/取消
+#[tauri::command]
+pub async fn mcp_agent_tab_ready(
+    hub: tauri::State<'_, Arc<McpUiHub>>,
+    request_id: String,
+    tab_id: Option<String>,
+    error: Option<String>,
+) -> Result<bool, String> {
+    let result = match tab_id {
+        Some(t) => Ok(t),
+        None => Err(error.unwrap_or_else(|| "未知错误".into())),
+    };
+    Ok(hub.resolve_tab(&request_id, result))
 }
 
 #[cfg(test)]
@@ -275,6 +332,26 @@ mod tests {
         assert_eq!(
             hub.wait(&id, Duration::from_secs(1)).await,
             ApprovalWait::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_request_roundtrip() {
+        let (hub, seen) = hub_with_sink();
+        let (id, rx) = hub.request_tab("s", "web").unwrap();
+        let frame = seen.lock()[0].clone();
+        assert_eq!(frame["type"], "agent_terminal_open");
+        assert_eq!(frame["requestId"], id.as_str());
+        assert!(hub.resolve_tab(&id, Ok("t9".into())));
+        assert_eq!(rx.await.unwrap(), Ok("t9".to_string()));
+        // 已消费/取消的请求不能再回传
+        assert!(!hub.resolve_tab(&id, Ok("t10".into())));
+        let (id2, _rx2) = hub.request_tab("s", "web").unwrap();
+        hub.cancel_tab(&id2);
+        assert!(!hub.resolve_tab(&id2, Err("x".into())));
+        assert!(
+            McpUiHub::new().request_tab("s", "web").is_err(),
+            "无前端订阅不能开标签"
         );
     }
 

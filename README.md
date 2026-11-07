@@ -45,7 +45,7 @@ Built-in MCP server (Streamable HTTP, loopback-only + Bearer token); one-click a
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | Remote writes and meta ops (audited) |
 | `sftp_upload` / `sftp_download` | File transfer via the background transfer queue (shared with the UI transfer panel, **no size limit**; `wait_seconds` waits synchronously for completion) |
 | `sftp_transfer_list` | Poll transfer progress / state / errors |
-| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` | Interactive terminals: open a live shell on a session, send input, read the screen buffer, close it — for REPLs, pagers and other stateful interactions `ssh_exec` can't drive (own `terminal` permission group, **off by default**: raw keystrokes cannot pass the command policy) |
+| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` / `terminal_list` | Interactive terminals: open a live shell on a session, send input, read the screen buffer, close it — for REPLs, pagers and other stateful interactions `ssh_exec` can't drive. When the window is open the terminal appears as a normal tab: watch it, AI writes pause while you type, right-click to take back control; you can also right-click an existing tab to "Share with AI" (own `terminal` permission group, **off by default**: raw keystrokes cannot pass the command policy) |
 
 **Permission model** (resolved session → nearest group → global):
 

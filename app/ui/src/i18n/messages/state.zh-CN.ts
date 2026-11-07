@@ -113,4 +113,12 @@ export const zhState = {
   'state.menu.clearScreen': '清空屏幕',
   'state.menu.reconnect': '重新连接',
   'state.menu.openSftp': '打开 SFTP',
+  'state.menu.shareAi': '共享给 AI',
+  'state.menu.revokeAi': '收回 AI 控制',
+  'state.aiShared': '已共享给 AI（agent 用 terminal_list 可见）',
+  'state.aiShareFailed': '共享给 AI 失败：{error}',
+  'state.aiRevoked': '已收回 AI 控制',
+  'state.aiTabOpened': 'AI 打开了终端：{name}',
+  'state.aiTabNoSession': '会话不存在或为本地会话',
+  'state.aiTabClosedByUser': '用户关闭了标签',
 } as const;

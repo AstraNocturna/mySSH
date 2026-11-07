@@ -81,6 +81,37 @@ export interface Pane {
   state: PaneState;
 }
 
+/** pane id → MCP terminal_open 请求 id：首次开链后回报后端（mcp_agent_tab_ready）并移除 */
+const agentTabRequests = new Map<string, string>();
+
+/** 取出并移除 pane 的 agent 请求 id（仅首次 attach 有值） */
+export function takeAgentRequest(paneId: string): string | undefined {
+  const id = agentTabRequests.get(paneId);
+  agentTabRequests.delete(paneId);
+  return id;
+}
+
+/** AI 控制中的后端终端标签：agent = MCP terminal_open 打开，shared = 用户共享 */
+export type AiTabKind = 'agent' | 'shared';
+
+/** MCP 前端交互事件帧（后端 mcp_ui.rs / mcp_terminal.rs） */
+type McpUiFrame =
+  | Omit<McpApprovalRequest, 'receivedAt'>
+  | { type: 'agent_terminal_open'; requestId: string; sessionId: string; sessionName?: string }
+  | { type: 'agent_terminal_attached'; tabId: string; terminalId: string; kind: AiTabKind }
+  | { type: 'agent_terminal_closed'; tabId: string };
+
+function withoutAiTab(m: Record<string, AiTabKind>, tabId: string): Record<string, AiTabKind> {
+  return Object.fromEntries(Object.entries(m).filter(([k]) => k !== tabId));
+}
+
+/** 回报 agent 标签开链结果（失败/取消带 error）；后端已超时则忽略 */
+export function reportAgentTab(requestId: string, tabId: string | null, error?: string): void {
+  void invoke('mcp_agent_tab_ready', { requestId, tabId, error: error ?? null }).catch(
+    () => undefined,
+  );
+}
+
 export interface Tab {
   /** 本地稳定 id（React key） */
   id: string;
@@ -131,6 +162,11 @@ interface AppStore {
   subscribeMcpUi(): void;
   /** 应答审批并出队；到期未答的由弹窗以 allow=false 出队 */
   answerApproval(id: string, allow: boolean): void;
+  /** AI 控制中的终端（键 = 后端 tabId） */
+  aiTabs: Record<string, AiTabKind>;
+  /** 把终端共享给 AI / 收回 AI 控制（参数为后端 tabId） */
+  shareTabWithAi(backendTabId: string): Promise<void>;
+  revokeAiTab(backendTabId: string): Promise<void>;
 
   /** 打开连接对话框；editTarget=编辑既有会话，presetGroup=预填分组路径（分组菜单「新建连接」） */
   openConnect(editTarget?: SessionRecord, presetGroup?: string): void;
@@ -275,7 +311,12 @@ export const useAppStore = create<AppStore>((set, get) => {
   const doCloseTab = (id: string) => {
     const { tabs, activeId } = get();
     const tab = tabs.find((t) => t.id === id);
-    if (tab) for (const pid of paneIds(tab.layout)) void tab.panes[pid]?.session.close();
+    if (tab)
+      for (const pid of paneIds(tab.layout)) {
+        const req = takeAgentRequest(pid);
+        if (req) reportAgentTab(req, null, tNow('state.aiTabClosedByUser'));
+        void tab.panes[pid]?.session.close();
+      }
     const next = tabs.filter((t) => t.id !== id);
     set((s) => ({
       tabs: next,
@@ -317,9 +358,28 @@ export const useAppStore = create<AppStore>((set, get) => {
     return { id, session, state: 'connecting' };
   };
 
-  const openTabWithTarget = (target: ConnectTarget, title: string) => {
+  /** agentRequestId 非空 = MCP agent 请求的标签：不抢焦点（已有活跃标签时），仅通知 */
+  const openTabWithTarget = (target: ConnectTarget, title: string, agentRequestId?: string) => {
     const tabId = `${idPrefix}tab${tabSeq++}`;
     const pane = makePane(tabId);
+    if (agentRequestId) {
+      agentTabRequests.set(pane.id, agentRequestId);
+      set((s) => ({
+        tabs: [
+          ...s.tabs,
+          {
+            id: tabId,
+            title,
+            target,
+            layout: leaf(pane.id),
+            panes: { [pane.id]: pane },
+            activePaneId: pane.id,
+          },
+        ],
+        activeId: s.activeId ?? tabId,
+      }));
+      return;
+    }
     const tab: Tab = {
       id: tabId,
       title,
@@ -338,6 +398,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     pendingHostKeys: [],
     pendingKis: [],
     pendingApprovals: [],
+    aiTabs: {},
     editing: null,
     connectPreset: null,
     sessions: [],
@@ -398,14 +459,38 @@ export const useAppStore = create<AppStore>((set, get) => {
     subscribeMcpUi: () => {
       if (mcpUiSubscribed) return;
       mcpUiSubscribed = true;
-      const events = new Channel<Omit<McpApprovalRequest, 'receivedAt'>>();
+      const events = new Channel<McpUiFrame>();
       events.onmessage = (frame) => {
-        if (frame.type !== 'approval_request') return;
-        set((s) =>
-          s.pendingApprovals.some((a) => a.id === frame.id)
-            ? s
-            : { pendingApprovals: [...s.pendingApprovals, { ...frame, receivedAt: Date.now() }] },
-        );
+        if (frame.type === 'approval_request') {
+          set((s) =>
+            s.pendingApprovals.some((a) => a.id === frame.id)
+              ? s
+              : { pendingApprovals: [...s.pendingApprovals, { ...frame, receivedAt: Date.now() }] },
+          );
+        } else if (frame.type === 'agent_terminal_open') {
+          // 标签窗口只在主窗口开，避免分离窗口重复开
+          if (windowLabel !== 'main') return;
+          const rec = get().sessions.find((r) => r.id === frame.sessionId);
+          if (!rec || rec.kind === 'local') {
+            reportAgentTab(frame.requestId, null, tNow('state.aiTabNoSession'));
+            return;
+          }
+          openTabWithTarget(
+            {
+              kind: 'session',
+              sessionId: rec.id,
+              sessionKind: 'ssh',
+              encoding: rec.encoding ?? null,
+            },
+            `AI · ${frame.sessionName ?? rec.name}`,
+            frame.requestId,
+          );
+          get().notify(tNow('state.aiTabOpened', { name: frame.sessionName ?? rec.name }), 'info');
+        } else if (frame.type === 'agent_terminal_attached') {
+          set((s) => ({ aiTabs: { ...s.aiTabs, [frame.tabId]: frame.kind } }));
+        } else if (frame.type === 'agent_terminal_closed') {
+          set((s) => ({ aiTabs: withoutAiTab(s.aiTabs, frame.tabId) }));
+        }
       };
       void invoke('mcp_ui_subscribe', { events });
     },
@@ -413,6 +498,22 @@ export const useAppStore = create<AppStore>((set, get) => {
     answerApproval: (id, allow) => {
       void invoke('mcp_approve', { id, allow }).catch(() => undefined);
       set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) }));
+    },
+
+    shareTabWithAi: async (backendTabId) => {
+      try {
+        await invoke('mcp_share_tab', { tabId: backendTabId });
+        set((s) => ({ aiTabs: { ...s.aiTabs, [backendTabId]: 'shared' } }));
+        get().notify(tNow('state.aiShared'), 'success');
+      } catch (e) {
+        get().notify(tNow('state.aiShareFailed', { error: String(e) }), 'error');
+      }
+    },
+
+    revokeAiTab: async (backendTabId) => {
+      await invoke('mcp_unshare_tab', { tabId: backendTabId }).catch(() => undefined);
+      set((s) => ({ aiTabs: withoutAiTab(s.aiTabs, backendTabId) }));
+      get().notify(tNow('state.aiRevoked'), 'info');
     },
 
     subscribeTunnels: () => {

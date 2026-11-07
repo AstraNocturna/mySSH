@@ -14,7 +14,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { BROADCAST_INPUT_EVENT, initBroadcastReceiver } from '../term/broadcast';
-import { useAppStore } from './app-store';
+import { takeAgentRequest, useAppStore } from './app-store';
 import type { SessionRecord, TermOpenSpec } from '../term/types';
 
 const spec: TermOpenSpec = {
@@ -503,5 +503,80 @@ describe('重开已关闭标签（批次十一）', () => {
     state().reopenClosedTab();
     expect(state().tabs[0].title).toBe('host-11'); // 最近关闭的先重开
     expect(state().closedTabs).toHaveLength(9);
+  });
+});
+
+describe('MCP agent 终端标签', () => {
+  type Frame = Record<string, unknown>;
+  let push: (f: Frame) => void = () => undefined;
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'mcp_ui_subscribe') {
+        const ch = (args as { events: { onmessage: (f: Frame) => void } }).events;
+        push = (f) => ch.onmessage(f);
+      }
+      return Promise.resolve(undefined);
+    });
+    // 订阅只建一次（模块级标记）：首个用例建立后 push 持续可用
+    state().subscribeMcpUi();
+    useAppStore.setState({ aiTabs: {} });
+  });
+
+  const readyCalls = () =>
+    vi.mocked(invoke).mock.calls.filter(([c]) => c === 'mcp_agent_tab_ready');
+
+  it('agent 请求开标签：不抢已有活跃标签，记录请求 id 供首次 attach 回报', () => {
+    state().connect(spec);
+    const active = state().activeId;
+    useAppStore.setState({ sessions: [rec] });
+    push({ type: 'agent_terminal_open', requestId: 'r1', sessionId: 's1', sessionName: 'web-01' });
+    const tabs = state().tabs;
+    expect(tabs).toHaveLength(2);
+    expect(state().activeId).toBe(active);
+    expect(tabs[1].title).toBe('AI · web-01');
+    expect(tabs[1].target).toMatchObject({ kind: 'session', sessionId: 's1' });
+    expect(takeAgentRequest(tabs[1].activePaneId)).toBe('r1');
+    // 只回报一次
+    expect(takeAgentRequest(tabs[1].activePaneId)).toBeUndefined();
+  });
+
+  it('会话不存在或为本地会话：立即回报失败，不开标签', () => {
+    useAppStore.setState({ sessions: [{ ...rec, id: 'loc', kind: 'local' }] });
+    push({ type: 'agent_terminal_open', requestId: 'r2', sessionId: 'missing' });
+    push({ type: 'agent_terminal_open', requestId: 'r3', sessionId: 'loc' });
+    expect(state().tabs).toHaveLength(0);
+    const calls = readyCalls();
+    expect(calls.map(([, a]) => (a as { requestId: string }).requestId)).toEqual(['r2', 'r3']);
+    for (const [, a] of calls) expect((a as { error: unknown }).error).toBeTruthy();
+  });
+
+  it('开链前用户关掉标签：回报失败，后端不必干等超时', () => {
+    useAppStore.setState({ sessions: [rec] });
+    push({ type: 'agent_terminal_open', requestId: 'r4', sessionId: 's1' });
+    const t = state().tabs[0];
+    state().setPaneState(t.id, t.activePaneId, 'closed');
+    state().closeTab(t.id);
+    const calls = readyCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toMatchObject({ requestId: 'r4', tabId: null });
+    expect((calls[0][1] as { error: unknown }).error).toBeTruthy();
+  });
+
+  it('attached/closed 帧维护 AI 控制标记', () => {
+    push({ type: 'agent_terminal_attached', tabId: 'bt1', terminalId: 'x', kind: 'agent' });
+    push({ type: 'agent_terminal_attached', tabId: 'bt2', terminalId: 'y', kind: 'shared' });
+    expect(state().aiTabs).toEqual({ bt1: 'agent', bt2: 'shared' });
+    push({ type: 'agent_terminal_closed', tabId: 'bt1' });
+    expect(state().aiTabs).toEqual({ bt2: 'shared' });
+  });
+
+  it('共享失败（权限未放行）只提示错误，不打标记', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'mcp_share_tab' ? Promise.reject(new Error('denied')) : Promise.resolve(undefined),
+    );
+    await state().shareTabWithAi('bt9');
+    expect(state().aiTabs).toEqual({});
+    expect(state().notices.some((n) => n.level === 'error')).toBe(true);
   });
 });

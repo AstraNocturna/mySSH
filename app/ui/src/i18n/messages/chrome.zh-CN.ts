@@ -53,6 +53,8 @@ export const zhChrome = {
   'chrome.menuCloseRight': '关闭右侧',
   'chrome.menuCloseAll': '关闭全部',
   'chrome.bellTitle': '终端响铃',
+  'chrome.aiAgentTitle': 'AI 打开的终端：可旁观，你键入时 AI 暂停写入，右键可收回控制',
+  'chrome.aiSharedTitle': '已共享给 AI：右键终端可收回控制',
   'chrome.updateTitle': '发现新版本 v{version}',
   'chrome.updateBody': '确认后将下载并安装新版本，随后自动重启；重启会断开所有活跃会话。',
   'chrome.updateNow': '更新并重启',

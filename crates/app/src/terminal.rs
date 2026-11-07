@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -35,6 +35,7 @@ use crate::stream_protocol::CreditState;
 mod session;
 mod stream;
 
+pub(crate) use session::AgentTap;
 use session::{
     macro_lines, supervise, AnyReader, AnyWriter, Backend, SshReconnect, SuConfig, SuperviseCtx,
     TermSession,
@@ -88,6 +89,63 @@ impl TerminalManager {
             })
             .collect();
         json!({ "tabs": tabs.len(), "sessions": tabs })
+    }
+}
+
+/// AI 共享（MCP terminal_* 驱动 UI 标签）：TerminalManager 侧的接入面
+impl TerminalManager {
+    /// 为 UI 标签挂输出旁路；已有未关闭旁路时拒绝（一个标签同时只给一个 agent 终端）。
+    /// 返回旁路与标签所属会话档案 id（权限闸按会话判定用）。
+    pub(crate) fn attach_tap(
+        &self,
+        tab_id: &str,
+    ) -> Result<(Arc<AgentTap>, Option<String>), String> {
+        let sessions = self.sessions.lock();
+        let s = sessions
+            .get(tab_id)
+            .ok_or_else(|| format!("终端标签 {tab_id} 不存在或已关闭"))?;
+        let mut slot = s.tap.lock();
+        if slot.as_ref().is_some_and(|t| !t.is_closed()) {
+            return Err("该终端标签已在 AI 控制中".into());
+        }
+        let tap = Arc::new(AgentTap::new());
+        *slot = Some(tap.clone());
+        Ok((tap, s.session_id.clone()))
+    }
+
+    /// 标签所属会话档案 id（临时连接为 None）
+    pub(crate) fn session_of_tab(&self, tab_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .get(tab_id)
+            .and_then(|s| s.session_id.clone())
+    }
+
+    /// agent 写入：须仍持有该标签的旁路，且用户最近未在键入（用户优先）
+    pub(crate) async fn agent_write(
+        &self,
+        tab_id: &str,
+        tap: &Arc<AgentTap>,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let entry = {
+            let sessions = self.sessions.lock();
+            sessions
+                .get(tab_id)
+                .filter(|s| s.tap.lock().as_ref().is_some_and(|t| Arc::ptr_eq(t, tap)))
+                .map(|s| (s.writer.clone(), s.input_enc.clone()))
+        };
+        let Some((w, input_enc)) = entry.filter(|_| !tap.is_closed()) else {
+            return Err("终端已关闭或已被用户收回控制".into());
+        };
+        if tap.user_active(Instant::now()) {
+            return Err("用户正在该终端输入，AI 已让出输入权；请稍后重试".into());
+        }
+        let bytes = match input_enc {
+            Some(enc) => enc.lock().encode(data),
+            None => data.to_vec(),
+        };
+        w.write(&bytes).await
     }
 }
 
@@ -149,6 +207,7 @@ pub async fn term_open(
             let focused = Arc::new(AtomicBool::new(true));
             let ring = Arc::new(RingBuf::new(RING_CAP));
             let writer = Arc::new(AnyWriter::Local(pty.writer));
+            let tap = session::TapSlot::default();
             let task = tauri::async_runtime::spawn(supervise(SuperviseCtx {
                 tab_id: tab_id.clone(),
                 mgr: mgr.clone(),
@@ -168,6 +227,7 @@ pub async fn term_open(
                 credit: credit.clone(),
                 focused: focused.clone(),
                 ring: ring.clone(),
+                tap: tap.clone(),
                 reader: AnyReader::Local(pty.reader),
             }));
             mgr.sessions.lock().insert(
@@ -181,6 +241,7 @@ pub async fn term_open(
                     rows: AtomicU64::new(rows as u64),
                     focused,
                     ring,
+                    tap,
                     task,
                 },
             );
@@ -312,6 +373,7 @@ pub async fn term_open(
     let credit = Arc::new(CreditState::new(stream_epoch));
     let focused = Arc::new(AtomicBool::new(true));
     let ring = Arc::new(RingBuf::new(RING_CAP));
+    let tap = session::TapSlot::default();
     let task = tauri::async_runtime::spawn(supervise(SuperviseCtx {
         tab_id: tab_id.clone(),
         mgr: mgr.clone(),
@@ -333,6 +395,7 @@ pub async fn term_open(
         credit: credit.clone(),
         focused: focused.clone(),
         ring: ring.clone(),
+        tap: tap.clone(),
         reader: AnyReader::Ssh(reader),
     }));
 
@@ -347,6 +410,7 @@ pub async fn term_open(
             rows: AtomicU64::new(rows as u64),
             focused,
             ring,
+            tap,
             task,
         },
     );
@@ -371,7 +435,10 @@ pub async fn term_input_raw(
         .map_err(|e| format!("b64 解码失败: {e}"))?;
     let writer = {
         let sessions = state.sessions.lock();
-        sessions.get(&tab_id).map(|s| s.writer.clone())
+        sessions.get(&tab_id).map(|s| {
+            s.mark_user_input();
+            s.writer.clone()
+        })
     };
     match writer {
         Some(w) => w.write(&bytes).await.map_err(|e| e.to_string()),
@@ -388,9 +455,10 @@ pub async fn term_input(
     // 输入转码在锁内取走编码器引用（Arc 克隆即释放锁），utf-8（None）零拷贝直通
     let entry = {
         let sessions = state.sessions.lock();
-        sessions
-            .get(&tab_id)
-            .map(|s| (s.writer.clone(), s.input_enc.clone()))
+        sessions.get(&tab_id).map(|s| {
+            s.mark_user_input();
+            (s.writer.clone(), s.input_enc.clone())
+        })
     };
     match entry {
         Some((w, input_enc)) => {
@@ -471,6 +539,7 @@ pub async fn term_close(
 ) -> Result<(), String> {
     let session = state.sessions.lock().remove(&tab_id);
     if let Some(session) = session {
+        session::close_tap(&session.tap);
         let _ = session.writer.close().await;
         session.task.abort();
         if let Some(sid) = session.session_id {
