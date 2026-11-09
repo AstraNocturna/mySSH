@@ -45,6 +45,16 @@ export function splitLeaf(
   return root;
 }
 
+/** 整棵树作为 a、新叶作为 b 包一层 split（新叶贴在整个标签的下方/右侧） */
+export function appendLeaf(
+  root: LayoutNode,
+  dir: 'row' | 'col',
+  newPaneId: string,
+  ratio: number,
+): LayoutNode {
+  return { kind: 'split', id: `sp${splitSeq++}`, dir, a: root, b: leaf(newPaneId), ratio };
+}
+
 /** 摘除某叶并把父 split 折叠为兄弟子树；树空返回 null */
 export function removeLeaf(root: LayoutNode, paneId: string): LayoutNode | null {
   if (root.kind === 'leaf') return root.paneId === paneId ? null : root;

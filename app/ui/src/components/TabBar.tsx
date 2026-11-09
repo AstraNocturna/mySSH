@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { isLocalTarget, useAppStore, type Tab } from '../state/app-store';
+import { isLocalTarget, primaryPane, useAppStore, type Tab } from '../state/app-store';
 import { ContextMenu, type MenuItem } from './ContextMenu';
 import { useT } from '../i18n';
 
@@ -34,41 +34,6 @@ export function TabBar() {
     const sessionId = t.target.kind === 'session' ? t.target.sessionId : null;
     // 本地会话禁用 SSH 专属入口（SFTP/监控/隧道）；分屏/分离窗口可用
     const isRemote = isSession && !isLocalTarget(t.target);
-    const close: MenuItem[] = [
-      { label: tr('chrome.menuClose'), icon: '✕', onSelect: () => s.closeTab(t.id) },
-      {
-        label: tr('chrome.menuCloseOthers'),
-        icon: '✕',
-        disabled: s.tabs.length < 2,
-        onSelect: () => s.closeOtherTabs(t.id),
-      },
-      {
-        label: tr('chrome.menuCloseRight'),
-        icon: '✕',
-        disabled: idx < 0 || idx >= s.tabs.length - 1,
-        onSelect: () => s.closeTabsToRight(t.id),
-      },
-      {
-        label: tr('chrome.menuCloseAll'),
-        icon: '✕',
-        disabled: s.tabs.length < 2,
-        onSelect: () => s.closeAllTabs(),
-      },
-    ];
-    // AI 命令镜像：无连接，只保留打开该会话（真实终端）与关闭类菜单
-    if (t.mirrorOf) {
-      const sid = t.mirrorOf;
-      const name = s.sessions.find((r) => r.id === sid)?.name ?? t.title;
-      return [
-        {
-          label: tr('chrome.mirrorOpenSession'),
-          icon: '▶',
-          onSelect: () => s.connectOrActivate(sid, name),
-        },
-        'separator',
-        ...close,
-      ];
-    }
     return [
       { label: tr('chrome.menuReconnect'), icon: '▶', onSelect: () => s.reconnectTab(t.id) },
       { label: tr('chrome.menuDisconnect'), icon: '⏻', onSelect: () => s.disconnectTab(t.id) },
@@ -123,14 +88,32 @@ export function TabBar() {
         },
       },
       'separator',
-      ...close,
+      { label: tr('chrome.menuClose'), icon: '✕', onSelect: () => s.closeTab(t.id) },
+      {
+        label: tr('chrome.menuCloseOthers'),
+        icon: '✕',
+        disabled: s.tabs.length < 2,
+        onSelect: () => s.closeOtherTabs(t.id),
+      },
+      {
+        label: tr('chrome.menuCloseRight'),
+        icon: '✕',
+        disabled: idx < 0 || idx >= s.tabs.length - 1,
+        onSelect: () => s.closeTabsToRight(t.id),
+      },
+      {
+        label: tr('chrome.menuCloseAll'),
+        icon: '✕',
+        disabled: s.tabs.length < 2,
+        onSelect: () => s.closeAllTabs(),
+      },
     ];
   };
 
   return (
     <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-800 bg-neutral-900 px-2 py-1">
       {tabs.map((t) => {
-        const pane = t.panes[t.activePaneId];
+        const pane = primaryPane(t);
         const aiKind = Object.values(t.panes)
           .map((p) => (p.session.tabId ? aiTabs[p.session.tabId] : undefined))
           .find((k) => k !== undefined);
@@ -185,17 +168,8 @@ export function TabBar() {
               setMenu({ x: e.clientX, y: e.clientY, tab: t });
             }}
           >
-            {t.mirrorOf ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />
-            ) : (
-              <span className={`h-1.5 w-1.5 rounded-full ${STATE_DOT[pane?.state ?? ''] ?? ''}`} />
-            )}
-            <span
-              className="max-w-40 truncate"
-              title={t.mirrorOf ? tr('chrome.mirrorTitle') : undefined}
-            >
-              {t.title}
-            </span>
+            <span className={`h-1.5 w-1.5 rounded-full ${STATE_DOT[pane?.state ?? ''] ?? ''}`} />
+            <span className="max-w-40 truncate">{t.title}</span>
             {aiKind && (
               <span
                 className="rounded bg-purple-600/70 px-1 text-[10px] leading-4 text-white"

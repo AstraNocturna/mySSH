@@ -564,8 +564,7 @@ describe('MCP agent 终端标签', () => {
     expect((calls[0][1] as { error: unknown }).error).toBeTruthy();
   });
 
-  it('AI 命令镜像：每会话一个只读标签，输出按序汇入，不影响连接与重开', () => {
-    useAppStore.setState({ sessions: [rec] });
+  describe('AI 命令镜像：会话标签内的只读分屏', () => {
     const start = (execId: string, command: string) =>
       push({
         type: 'exec_start',
@@ -575,57 +574,103 @@ describe('MCP agent 终端标签', () => {
         tool: 'ssh_exec',
         command,
       });
-    start('e1', 'uptime');
-    push({
-      type: 'exec_output',
-      execId: 'e1',
-      sessionId: 's1',
-      stream: 'stdout',
-      data: 'up 3 days\n',
-    });
-    push({
-      type: 'exec_end',
-      execId: 'e1',
-      sessionId: 's1',
-      status: 'ok',
-      exitCode: 0,
-      durationMs: 5,
-      error: null,
-      omittedBytes: 0,
-    });
-    start('e2', 'df -h');
-    const tabs = state().tabs;
-    expect(tabs).toHaveLength(1);
-    const m = tabs[0];
-    expect(m.mirrorOf).toBe('s1');
-    expect(m.title).toBe('AI · web-01');
-    expect(state().activeId).toBe(m.id);
-    expect(m.panes[m.activePaneId].state).toBe('closed');
-
-    const got: string[] = [];
-    feedOf(m.id).attach((s) => got.push(s));
+    const mirrorPanes = () =>
+      state().tabs.flatMap((t) => Object.values(t.panes).filter((p) => p.mirror));
     // eslint-disable-next-line no-control-regex
-    const text = got.join('').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-    expect(text).toMatch(/\$ uptime\r\nup 3 days\r\n✓ exit 0 · 5 ms\r\n\r\n.*\$ df -h/s);
+    const plain = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
 
-    // 镜像不可分屏；连接该会话另开真实终端，不被镜像标签「激活」顶替
-    state().splitActive('row');
-    expect(Object.keys(state().tabs[0].panes)).toHaveLength(1);
-    state().connectOrActivate('s1', 'web-01');
-    expect(state().tabs).toHaveLength(2);
-    expect(state().tabs[1].mirrorOf).toBeUndefined();
+    it('会话标签已打开：不另开标签，镜像挂在该标签下方，输出按序汇入', () => {
+      useAppStore.setState({ sessions: [rec] });
+      state().connectOrActivate('s1', 'web-01');
+      const tab = state().tabs[0];
+      const termPane = tab.activePaneId;
+      state().connect(spec); // 另一个标签处于活动状态
+      start('e1', 'uptime');
+      push({
+        type: 'exec_output',
+        execId: 'e1',
+        sessionId: 's1',
+        stream: 'stdout',
+        data: 'up 3 days\n',
+      });
+      push({
+        type: 'exec_end',
+        execId: 'e1',
+        sessionId: 's1',
+        status: 'ok',
+        exitCode: 0,
+        durationMs: 5,
+        error: null,
+        omittedBytes: 0,
+      });
+      start('e2', 'df -h');
 
-    // 关闭镜像无需确认、不进已关闭栈；之后的输出丢弃，下一条命令重新开标签
-    state().closeTab(m.id);
-    expect(state().pendingCloseTabs).toBeNull();
-    expect(state().tabs.some((t) => t.mirrorOf)).toBe(false);
-    expect(state().closedTabs).toHaveLength(0);
-    push({ type: 'exec_output', execId: 'e2', sessionId: 's1', stream: 'stdout', data: 'x' });
-    expect(state().tabs.some((t) => t.mirrorOf)).toBe(false);
-    start('e3', 'id');
-    expect(state().tabs.filter((t) => t.mirrorOf)).toHaveLength(1);
+      expect(state().tabs).toHaveLength(2);
+      const t = state().tabs[0];
+      expect(state().activeId).toBe(t.id); // 切到会话标签
+      expect(t.activePaneId).toBe(termPane); // 不抢终端 pane 焦点
+      const mirrors = Object.values(t.panes).filter((p) => p.mirror);
+      expect(mirrors).toHaveLength(1); // 同会话多条命令共用一个镜像
+      expect(mirrors[0].state).toBe('closed');
+      expect(t.layout).toMatchObject({
+        kind: 'split',
+        dir: 'col',
+        a: { kind: 'leaf', paneId: termPane },
+        b: { kind: 'leaf', paneId: mirrors[0].id },
+      });
+
+      const got: string[] = [];
+      feedOf(mirrors[0].id).attach((s) => got.push(s));
+      expect(plain(got.join(''))).toMatch(
+        /\$ uptime\r\nup 3 days\r\n✓ exit 0 · 5 ms\r\n\r\n.*\$ df -h/s,
+      );
+    });
+
+    it('会话未打开：自动打开会话终端标签并挂镜像；关闭标签镜像随之关闭', () => {
+      useAppStore.setState({ sessions: [rec] });
+      start('e1', 'id');
+      expect(state().tabs).toHaveLength(1);
+      const t = state().tabs[0];
+      expect(t.target).toMatchObject({ kind: 'session', sessionId: 's1' });
+      expect(t.title).toBe('web-01');
+      const panes = Object.values(t.panes);
+      expect(panes.filter((p) => !p.mirror)).toHaveLength(1); // 真实终端
+      expect(panes.filter((p) => p.mirror)).toHaveLength(1);
+      expect(t.panes[t.activePaneId].mirror).toBeFalsy();
+
+      state().setPaneState(t.id, t.activePaneId, 'closed');
+      state().closeTab(t.id);
+      expect(state().tabs).toHaveLength(0);
+      // 后续输出丢弃，不重开标签
+      push({ type: 'exec_output', execId: 'e1', sessionId: 's1', stream: 'stdout', data: 'x' });
+      expect(state().tabs).toHaveLength(0);
+      // 重开已关闭标签恢复为普通终端，不带镜像
+      state().reopenClosedTab();
+      expect(mirrorPanes()).toHaveLength(0);
+    });
+
+    it('单独关闭镜像 pane 保留终端；关闭终端只剩镜像则整标签关闭', () => {
+      useAppStore.setState({ sessions: [rec] });
+      start('e1', 'id');
+      const t = state().tabs[0];
+      const termPane = t.activePaneId;
+      const mirror = mirrorPanes()[0].id;
+
+      state().closePane(t.id, mirror);
+      expect(state().tabs).toHaveLength(1);
+      expect(Object.keys(state().tabs[0].panes)).toEqual([termPane]);
+      expect(state().tabs[0].layout).toEqual({ kind: 'leaf', paneId: termPane });
+
+      // 下一条命令重新挂镜像（同一标签）
+      start('e2', 'ls');
+      expect(state().tabs).toHaveLength(1);
+      expect(mirrorPanes()).toHaveLength(1);
+
+      state().setPaneState(t.id, termPane, 'closed');
+      state().closePane(t.id, termPane);
+      expect(state().tabs).toHaveLength(0);
+    });
   });
-
   it('attached/closed 帧维护 AI 控制标记', () => {
     push({ type: 'agent_terminal_attached', tabId: 'bt1', terminalId: 'x', kind: 'agent' });
     push({ type: 'agent_terminal_attached', tabId: 'bt2', terminalId: 'y', kind: 'shared' });

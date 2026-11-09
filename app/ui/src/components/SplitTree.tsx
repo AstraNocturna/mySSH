@@ -24,7 +24,7 @@ export function SplitTree({
     return (
       // key=pane.id：分屏占比拖拽等同级重排时保持实例（leaf↔split 的跨层重挂由 TerminalView 保活池兜底）
       <PaneFrame key={node.paneId} tab={tab} paneId={node.paneId} visible={visible}>
-        {tab.mirrorOf ? (
+        {pane.mirror ? (
           <MirrorView tab={tab} pane={pane} />
         ) : (
           <TerminalView tab={tab} pane={pane} />

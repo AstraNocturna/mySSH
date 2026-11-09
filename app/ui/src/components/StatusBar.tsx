@@ -1,4 +1,4 @@
-import { useAppStore } from '../state/app-store';
+import { primaryPane, useAppStore } from '../state/app-store';
 import { paneIds } from '../term/layout';
 import { useT } from '../i18n';
 
@@ -40,7 +40,7 @@ export function StatusBar() {
     (t) => t.status === 'listening' || t.status === 'starting' || t.status === 'reconnecting',
   ).length;
   const activeTab = tabs.find((t) => t.id === activeId);
-  const activePane = activeTab?.panes[activeTab.activePaneId];
+  const activePane = activeTab ? primaryPane(activeTab) : undefined;
 
   return (
     <footer
@@ -60,22 +60,18 @@ export function StatusBar() {
           <>
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                activeTab.mirrorOf
-                  ? 'bg-purple-500'
-                  : activePane.state === 'connected'
-                    ? 'bg-green-500'
-                    : activePane.state === 'connecting' || activePane.state === 'reconnecting'
-                      ? 'bg-yellow-500'
-                      : 'bg-neutral-600'
+                activePane.state === 'connected'
+                  ? 'bg-green-500'
+                  : activePane.state === 'connecting' || activePane.state === 'reconnecting'
+                    ? 'bg-yellow-500'
+                    : 'bg-neutral-600'
               }`}
             />
             <span className="min-w-0 truncate">{activeTab.title}</span>
             <span className="text-neutral-600">
-              {activeTab.mirrorOf
-                ? t('chrome.mirrorTitle')
-                : PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY]
-                  ? t(PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY])
-                  : activePane.state}
+              {PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY]
+                ? t(PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY])
+                : activePane.state}
             </span>
           </>
         )}
