@@ -41,12 +41,19 @@ import {
 
 export type PaneState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error';
 
-/** 复合命令的一段（后端 core-policy explain）：原文、与下一段的连接符、主命令名、风险 */
+/** 复合命令的一段（后端 core-policy explain）：原文、连接符、主命令、写入的文件、风险 */
 export interface ApprovalPart {
   text: string;
   op: '|' | '||' | '&&' | ';' | '&' | null;
   head: string | null;
   sub: string | null;
+  /** sudo / nohup 等前缀命令 */
+  wrapper: string | null;
+  /** 输出重定向写入的文件 */
+  writes: string | null;
+  append: boolean;
+  /** heredoc 正文行数 */
+  heredocLines: number;
   risk: 'readonly' | 'write' | 'unparsed' | 'indirect' | 'blacklist';
 }
 
