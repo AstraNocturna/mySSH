@@ -9,6 +9,7 @@ import { readTermBackground, readTerminalSettings } from '../state/apply-setting
 import { Dialog } from './Dialog';
 import { ThemeStudio } from './ThemeStudio';
 import { MCP_LEVELS } from './mcp-options';
+import { RETENTION, RETENTION_MAX_DAYS, readRetentionDays } from './ai-backup-format';
 import { useT, type MsgKey } from '../i18n';
 
 const inputCls =
@@ -37,6 +38,42 @@ function installedFonts(): string[] {
   }
 }
 
+/** 保留天数输入：失焦/回车才提交——逐键提交时输入 "14" 会先按 1 天清理掉记录 */
+function DaysInput({
+  id,
+  value,
+  onCommit,
+}: {
+  id: string;
+  value: number;
+  onCommit: (days: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const commit = () => {
+    const v = Math.trunc(Number(draft));
+    if (v >= 1 && v <= RETENTION_MAX_DAYS) {
+      if (v !== value) onCommit(v);
+    } else {
+      setDraft(String(value));
+    }
+  };
+  return (
+    <input
+      id={id}
+      type="number"
+      className={`${inputCls} w-20`}
+      min={1}
+      max={RETENTION_MAX_DAYS}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+      }}
+    />
+  );
+}
+
 /** MCP 客户端配置片段：omp/pi 用 .omp/mcp.json；Claude Code 同构（mcpServers.http）；
  *  OpenCode 用 opencode.json 的 mcp 键 + type remote */
 function mcpConfigOmp(port: number, token: string): string {
@@ -55,6 +92,10 @@ function mcpConfigOmp(port: number, token: string): string {
   );
 }
 function mcpConfigClaude(port: number, token: string): string {
+  return mcpConfigOmp(port, token);
+}
+/** 通用：标准 mcpServers + type http（Cursor、Droid、Claude Code 等都认） */
+function mcpConfigGeneric(port: number, token: string): string {
   return mcpConfigOmp(port, token);
 }
 function mcpConfigOpencode(port: number, token: string): string {
@@ -166,6 +207,16 @@ export function SettingsDialog() {
       await invoke('mcp_restart');
     } catch {
       // 落库/重启失败：设置面板下次打开按库中值渲染，不阻断 UI
+    }
+  };
+  /** 保留天数：等落库完成再让后端按新天数清理一次 */
+  const setRetention = async (key: string, days: number) => {
+    setSetting(key, days);
+    try {
+      await invoke('settings_set', { key, value: days });
+      await invoke('retention_apply');
+    } catch (e) {
+      notify(String(e), 'error');
     }
   };
   // 批次十一 8：断线重连次数（0-20，默认 5）
@@ -311,6 +362,34 @@ export function SettingsDialog() {
                     )}
                 </div>
                 <p className="mt-1 text-xs text-neutral-500">{t('dialogs.downloadDirHint')}</p>
+              </section>
+
+              <section>
+                <h3 className="mb-1.5 font-semibold text-neutral-200">
+                  {t('dialogs.retentionSection')}
+                </h3>
+                <div className="grid grid-cols-[auto_auto_1fr] items-center gap-x-2 gap-y-1.5">
+                  {(
+                    [
+                      ['aiBackups', 'dialogs.retentionAiBackups'],
+                      ['audit', 'dialogs.retentionAudit'],
+                    ] as const
+                  ).map(([which, labelKey]) => (
+                    <div key={which} className="contents">
+                      <label htmlFor={`set-retention-${which}`} className="text-neutral-400">
+                        {t(labelKey)}
+                      </label>
+                      <DaysInput
+                        key={readRetentionDays(settings, which)}
+                        id={`set-retention-${which}`}
+                        value={readRetentionDays(settings, which)}
+                        onCommit={(d) => void setRetention(RETENTION[which].key, d)}
+                      />
+                      <span className="text-neutral-500">{t('dialogs.retentionDays')}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-1 text-xs text-neutral-500">{t('dialogs.retentionHint')}</p>
               </section>
 
               {/* 轴一 1.2：一键导出诊断包（日志可能含主机地址/用户名，文案提示用户自审） */}
@@ -677,13 +756,19 @@ export function SettingsDialog() {
                     <span className="flex flex-wrap items-center gap-1.5">
                       {(
                         [
+                          [
+                            t('dialogs.mcpConfigGeneric'),
+                            mcpConfigGeneric(mcpPort, mcpToken),
+                            t('dialogs.mcpConfigGenericHint'),
+                          ],
                           ['omp', mcpConfigOmp(mcpPort, mcpToken)],
                           ['Claude Code', mcpConfigClaude(mcpPort, mcpToken)],
                           ['OpenCode', mcpConfigOpencode(mcpPort, mcpToken)],
                         ] as const
-                      ).map(([label, json]) => (
+                      ).map(([label, json, hint]) => (
                         <button
                           key={label}
+                          title={hint}
                           className="rounded bg-neutral-800 px-2 py-0.5 text-neutral-300 hover:bg-neutral-700"
                           onClick={() => {
                             void writeText(json)

@@ -973,7 +973,8 @@ fn tools_list(perms: &McpPerms) -> Value {
                     "properties": {
                         "session_id": { "type": "string" },
                         "path": { "type": "string" },
-                        "content": { "type": "string", "description": "完整新内容（UTF-8）" }
+                        "content": { "type": "string", "description": "完整新内容（UTF-8）" },
+                        "title": { "type": "string", "description": "可选：一句话概括这次改动（≤120 字），显示在用户的「AI 文件改动」记录里，方便回滚时辨认" }
                     },
                     "required": ["session_id", "path", "content"],
                     "additionalProperties": false
@@ -1000,7 +1001,8 @@ fn tools_list(perms: &McpPerms) -> Value {
                     "properties": {
                         "session_id": { "type": "string" },
                         "path": { "type": "string" },
-                        "recursive": { "type": "boolean", "default": false }
+                        "recursive": { "type": "boolean", "default": false },
+                        "title": { "type": "string", "description": "可选：一句话概括这次改动（≤120 字），显示在用户的「AI 文件改动」记录里，方便回滚时辨认" }
                     },
                     "required": ["session_id", "path"],
                     "additionalProperties": false
@@ -1102,7 +1104,8 @@ fn tools_list(perms: &McpPerms) -> Value {
                         "old_str": { "type": "string" },
                         "new_str": { "type": "string" },
                         "replace_all": { "type": "boolean", "default": false },
-                        "expected_etag": { "type": "string", "description": "file_view 返回的 etag；文件已变化则拒绝" }
+                        "expected_etag": { "type": "string", "description": "file_view 返回的 etag；文件已变化则拒绝" },
+                        "title": { "type": "string", "description": "可选：一句话概括这次改动（≤120 字），显示在用户的「AI 文件改动」记录里，方便回滚时辨认" }
                     },
                     "required": ["session_id", "path", "old_str", "new_str"],
                     "additionalProperties": false
@@ -1143,7 +1146,7 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "file_backups",
-                "description": "列出该会话的 AI 文件改动备份（新→旧）：id/路径/触发工具/改前是否存在/时间",
+                "description": "列出该会话的 AI 文件改动备份（新→旧）：id/路径/触发工具/标题/改动摘要/改前是否存在/时间。备份按设置的保留天数（默认 7 天）自动清理",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1959,6 +1962,7 @@ async fn sftp_tool_inner(st: &ServerState, name: &str, args: &Value) -> Result<S
                 &sid,
                 path,
                 name,
+                crate::mcp_files::title_arg(args).as_deref(),
                 Some(content.as_bytes()),
             )
             .await;
@@ -2023,6 +2027,7 @@ async fn sftp_tool_inner(st: &ServerState, name: &str, args: &Value) -> Result<S
                         &sid,
                         path,
                         name,
+                        crate::mcp_files::title_arg(args).as_deref(),
                         None,
                     )
                     .await;

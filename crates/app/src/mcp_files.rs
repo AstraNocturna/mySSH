@@ -36,8 +36,10 @@ const WALK_MAX_DEPTH: usize = 24;
 const WALK_BUDGET: Duration = Duration::from_secs(20);
 const GREP_PARALLEL: usize = 8;
 const SKIP_DIRS: &[&str] = &[".git", ".svn", ".hg", "node_modules"];
-/// 备份保留条数（超出删最旧）
+/// 备份保留条数（超出删最旧）；按天数过期另见 retention 模块
 const MAX_BACKUPS: usize = 300;
+/// AI 自述改动标题的长度上限（字符）
+const TITLE_MAX_CHARS: usize = 120;
 static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
@@ -79,12 +81,112 @@ pub struct BackupMeta {
     pub after_sha256: Option<String>,
     /// unix 毫秒
     pub created_at: u64,
+    /// AI 自述的改动标题（未经核实，仅供辨认）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// 据改前/改后内容算出的改动摘要；旧版本写的备份没有此字段
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<ChangeSummary>,
+}
+
+/// 改动摘要（前端按语言渲染成一句话）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ChangeSummary {
+    Created {
+        lines: usize,
+    },
+    Deleted {
+        lines: usize,
+    },
+    /// line = 首个不同行（1 起，按改后内容）；added/removed = 中间差异段的行数
+    Modified {
+        line: usize,
+        added: usize,
+        removed: usize,
+    },
+    Unchanged,
+    Binary {
+        before_bytes: u64,
+        after_bytes: u64,
+    },
+}
+
+fn line_count(text: &str) -> usize {
+    text.split_inclusive('\n').count()
+}
+
+/// 公共前缀/后缀行之外即差异段：不求最小编辑距离，够用户辨认「改了哪儿、改了多少」
+pub(crate) fn summarize_change(before: Option<&[u8]>, after: Option<&[u8]>) -> ChangeSummary {
+    let text = |b: &[u8]| {
+        if looks_binary(b) {
+            None
+        } else {
+            std::str::from_utf8(b).ok().map(str::to_owned)
+        }
+    };
+    match (before, after) {
+        (None, None) => ChangeSummary::Unchanged,
+        (None, Some(a)) => match text(a) {
+            Some(t) => ChangeSummary::Created {
+                lines: line_count(&t),
+            },
+            None => ChangeSummary::Binary {
+                before_bytes: 0,
+                after_bytes: a.len() as u64,
+            },
+        },
+        (Some(b), None) => match text(b) {
+            Some(t) => ChangeSummary::Deleted {
+                lines: line_count(&t),
+            },
+            None => ChangeSummary::Binary {
+                before_bytes: b.len() as u64,
+                after_bytes: 0,
+            },
+        },
+        (Some(b), Some(a)) if b == a => ChangeSummary::Unchanged,
+        (Some(b), Some(a)) => match (text(b), text(a)) {
+            (Some(tb), Some(ta)) => {
+                let lb: Vec<&str> = tb.split_inclusive('\n').collect();
+                let la: Vec<&str> = ta.split_inclusive('\n').collect();
+                let prefix = lb.iter().zip(&la).take_while(|(x, y)| x == y).count();
+                let suffix = lb[prefix..]
+                    .iter()
+                    .rev()
+                    .zip(la[prefix..].iter().rev())
+                    .take_while(|(x, y)| x == y)
+                    .count();
+                ChangeSummary::Modified {
+                    line: prefix + 1,
+                    added: la.len() - prefix - suffix,
+                    removed: lb.len() - prefix - suffix,
+                }
+            }
+            _ => ChangeSummary::Binary {
+                before_bytes: b.len() as u64,
+                after_bytes: a.len() as u64,
+            },
+        },
+    }
+}
+
+/// AI 自述的改动标题：去空白，截断到 TITLE_MAX_CHARS
+pub(crate) fn title_arg(args: &Value) -> Option<String> {
+    let t = args.get("title").and_then(Value::as_str)?.trim();
+    (!t.is_empty()).then(|| t.chars().take(TITLE_MAX_CHARS).collect())
 }
 
 /// 本地备份目录：<id>.json 元数据 + <id>.bin 原内容（改动前不存在则无 .bin）
 pub struct BackupStore {
     root: PathBuf,
     lock: tokio::sync::Mutex<()>,
+    /// 保留时长（毫秒）；0 = 不按时间过期，只按条数封顶
+    retention_ms: std::sync::atomic::AtomicU64,
 }
 
 impl BackupStore {
@@ -92,7 +194,15 @@ impl BackupStore {
         Arc::new(Self {
             root,
             lock: tokio::sync::Mutex::new(()),
+            retention_ms: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    pub fn set_retention_days(&self, days: u32) {
+        self.retention_ms.store(
+            u64::from(days) * 86_400_000,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub fn default_root() -> PathBuf {
@@ -121,6 +231,7 @@ impl BackupStore {
         session_id: &str,
         path: &str,
         tool: &str,
+        title: Option<&str>,
         before: Option<&[u8]>,
         after: Option<&[u8]>,
     ) -> Result<BackupMeta, String> {
@@ -141,6 +252,8 @@ impl BackupStore {
             bytes: before.map_or(0, |b| b.len() as u64),
             after_sha256: after.map(sha256_hex),
             created_at,
+            title: title.map(str::to_owned),
+            change: Some(summarize_change(before, after)),
         };
         if let Some(b) = before {
             tokio::fs::write(self.data_path(&id), b)
@@ -183,15 +296,35 @@ impl BackupStore {
         ids
     }
 
-    async fn prune_locked(&self) {
+    /// 删掉过期（早于保留天数）与超出条数上限的最旧备份，返回删除条数
+    async fn prune_locked(&self) -> usize {
         let ids = self.ids_sorted().await;
-        if ids.len() <= MAX_BACKUPS {
-            return;
-        }
-        for id in &ids[..ids.len() - MAX_BACKUPS] {
+        let retention = self.retention_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let cutoff = if retention == 0 {
+            0
+        } else {
+            now_ms().saturating_sub(retention)
+        };
+        // id 前 13 位是创建时间（毫秒）；ids 升序，过期的都在前面
+        let expired = ids
+            .iter()
+            .take_while(|id| {
+                id.get(..13)
+                    .and_then(|t| t.parse::<u64>().ok())
+                    .is_some_and(|t| t < cutoff)
+            })
+            .count();
+        let remove = expired.max(ids.len().saturating_sub(MAX_BACKUPS));
+        for id in &ids[..remove] {
             let _ = tokio::fs::remove_file(self.meta_path(id)).await;
             let _ = tokio::fs::remove_file(self.data_path(id)).await;
         }
+        remove
+    }
+
+    pub async fn prune(&self) -> usize {
+        let _g = self.lock.lock().await;
+        self.prune_locked().await
     }
 
     /// 新→旧；session_id 给定时只列该会话
@@ -220,7 +353,7 @@ impl BackupStore {
         }
         let raw = tokio::fs::read(self.meta_path(id))
             .await
-            .map_err(|_| format!("备份 {id} 不存在（可能已超出保留上限被清理）"))?;
+            .map_err(|_| format!("备份 {id} 不存在（可能已过保留期或超出条数上限被清理）"))?;
         let meta: BackupMeta = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
         let data = if meta.existed {
             Some(
@@ -491,11 +624,12 @@ pub(crate) async fn backup_existing(
     session_id: &str,
     path: &str,
     tool: &str,
+    title: Option<&str>,
     after: Option<&[u8]>,
 ) -> Backup {
     match read_remote(ctx, path, FILE_MAX).await {
         Ok(before) => match backups
-            .save(session_id, path, tool, before.as_deref(), after)
+            .save(session_id, path, tool, title, before.as_deref(), after)
             .await
         {
             Ok(m) => Backup::Saved(m),
@@ -680,9 +814,17 @@ async fn file_edit(
     if content.len() as u64 > FILE_MAX {
         return Err(format!("编辑后超过上限 {FILE_MAX} 字节"));
     }
+    let title = title_arg(args);
     let backup = ctx
         .backups
-        .save(sid, path, tool, before.as_deref(), Some(content.as_bytes()))
+        .save(
+            sid,
+            path,
+            tool,
+            title.as_deref(),
+            before.as_deref(),
+            Some(content.as_bytes()),
+        )
         .await?;
     let p = path.to_string();
     let bytes = content.clone().into_bytes();
@@ -895,6 +1037,7 @@ pub(crate) async fn rollback(
             &meta.session_id,
             &meta.path,
             "rollback",
+            None,
             current.as_deref(),
             data.as_deref(),
         )
@@ -1050,15 +1193,31 @@ mod tests {
     async fn backup_roundtrip_list_and_discard() {
         let store = BackupStore::new(temp_root("rt"));
         let a = store
-            .save("s1", "/etc/a", "file_edit", Some(b"old"), Some(b"new"))
+            .save(
+                "s1",
+                "/etc/a",
+                "file_edit",
+                Some("改端口"),
+                Some(b"old"),
+                Some(b"new"),
+            )
             .await
             .unwrap();
         let b = store
-            .save("s2", "/etc/b", "file_edit", None, Some(b"x"))
+            .save("s2", "/etc/b", "file_edit", None, None, Some(b"x"))
             .await
             .unwrap();
         let (m, data) = store.load(&a.id).await.unwrap();
         assert_eq!(m, a);
+        assert_eq!(m.title.as_deref(), Some("改端口"));
+        assert_eq!(
+            m.change,
+            Some(ChangeSummary::Modified {
+                line: 1,
+                added: 1,
+                removed: 1
+            })
+        );
         assert_eq!(data.as_deref(), Some(&b"old"[..]));
         assert_eq!(m.after_sha256.as_deref(), Some(sha256_hex(b"new").as_str()));
         let (mb, db) = store.load(&b.id).await.unwrap();
@@ -1080,7 +1239,7 @@ mod tests {
         let mut first = None;
         for i in 0..MAX_BACKUPS + 3 {
             let m = store
-                .save("s", &format!("/f{i}"), "sftp_write", Some(b"x"), None)
+                .save("s", &format!("/f{i}"), "sftp_write", None, Some(b"x"), None)
                 .await
                 .unwrap();
             first.get_or_insert(m.id);
@@ -1092,5 +1251,116 @@ mod tests {
             store.load(first.as_deref().unwrap()).await.is_err(),
             "最旧的被清理"
         );
+    }
+
+    #[tokio::test]
+    async fn backup_prunes_expired_by_retention_days() {
+        let root = temp_root("expire");
+        let store = BackupStore::new(root.clone());
+        let old = store
+            .save("s", "/old", "file_edit", None, Some(b"a"), Some(b"b"))
+            .await
+            .unwrap();
+        // 把这条备份改成 8 天前创建：id 前 13 位即创建时间
+        let aged = format!("{:013}{}", now_ms() - 8 * 86_400_000, &old.id[13..]);
+        std::fs::rename(
+            root.join(format!("{}.json", old.id)),
+            root.join(format!("{aged}.json")),
+        )
+        .unwrap();
+        std::fs::rename(
+            root.join(format!("{}.bin", old.id)),
+            root.join(format!("{aged}.bin")),
+        )
+        .unwrap();
+        let fresh = store
+            .save("s", "/new", "file_edit", None, Some(b"a"), Some(b"b"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list(None, 10).await.len(),
+            2,
+            "未设保留天数：不按时间过期"
+        );
+        store.set_retention_days(7);
+        assert_eq!(store.prune().await, 1);
+        assert!(
+            !root.join(format!("{aged}.bin")).exists(),
+            "过期备份内容一并删除"
+        );
+        let left = store.list(None, 10).await;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, fresh.id);
+    }
+
+    #[test]
+    fn change_summary_describes_edit() {
+        let s = |b: Option<&str>, a: Option<&str>| {
+            summarize_change(b.map(str::as_bytes), a.map(str::as_bytes))
+        };
+        assert_eq!(s(None, Some("a\nb\n")), ChangeSummary::Created { lines: 2 });
+        assert_eq!(
+            s(Some("a\nb\nc\n"), None),
+            ChangeSummary::Deleted { lines: 3 }
+        );
+        assert_eq!(s(Some("x"), Some("x")), ChangeSummary::Unchanged);
+        assert_eq!(
+            s(Some("a\nb\nc\nd\n"), Some("a\nB\nB2\nc\nd\n")),
+            ChangeSummary::Modified {
+                line: 2,
+                added: 2,
+                removed: 1
+            },
+            "只算中间差异段，公共前后缀不计"
+        );
+        assert_eq!(
+            s(Some("a\nb\n"), Some("a\n")),
+            ChangeSummary::Modified {
+                line: 2,
+                added: 0,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            summarize_change(Some(b"\0\x01"), Some(b"\0\x02\x03")),
+            ChangeSummary::Binary {
+                before_bytes: 2,
+                after_bytes: 3
+            }
+        );
+        let v = serde_json::to_value(ChangeSummary::Binary {
+            before_bytes: 1,
+            after_bytes: 2,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            json!({ "kind": "binary", "beforeBytes": 1, "afterBytes": 2 })
+        );
+    }
+
+    #[test]
+    fn title_is_trimmed_and_capped() {
+        assert_eq!(
+            title_arg(&json!({ "title": "  改 nginx 端口  " })).as_deref(),
+            Some("改 nginx 端口")
+        );
+        assert_eq!(title_arg(&json!({ "title": "   " })), None);
+        assert_eq!(title_arg(&json!({})), None);
+        let long = "字".repeat(TITLE_MAX_CHARS + 5);
+        assert_eq!(
+            title_arg(&json!({ "title": long }))
+                .unwrap()
+                .chars()
+                .count(),
+            TITLE_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn legacy_meta_without_title_or_change_still_loads() {
+        let raw = r#"{"id":"0000000000001-0000000000","sessionId":"s","path":"/a","tool":"file_edit","existed":true,"bytes":1,"afterSha256":null,"createdAt":1}"#;
+        let m: BackupMeta = serde_json::from_str(raw).unwrap();
+        assert!(m.title.is_none() && m.change.is_none());
     }
 }

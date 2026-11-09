@@ -3,6 +3,12 @@ import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 import { Dialog } from './Dialog';
 import { useT } from '../i18n';
+import {
+  describeChange,
+  readRetentionDays,
+  toolLabel,
+  type ChangeSummary,
+} from './ai-backup-format';
 
 /** 后端 mcp_files::BackupMeta */
 interface BackupMeta {
@@ -14,6 +20,8 @@ interface BackupMeta {
   bytes: number;
   afterSha256: string | null;
   createdAt: number;
+  title?: string;
+  change?: ChangeSummary;
 }
 
 /**
@@ -29,6 +37,7 @@ export function AiBackupsDialog({
 }) {
   const t = useT();
   const notify = useAppStore((s) => s.notify);
+  const keepDays = useAppStore((s) => readRetentionDays(s.settings, 'aiBackups'));
   const [items, setItems] = useState<BackupMeta[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   /** 回滚被拒（远端已变化）的备份及原因，等待确认覆盖 */
@@ -72,7 +81,7 @@ export function AiBackupsDialog({
       <h2 className="mb-1 text-sm font-semibold text-neutral-100">
         {t('dialogs.aiBackupsTitle', { name: session.name })}
       </h2>
-      <p className="mb-3 text-neutral-500">{t('dialogs.aiBackupsHint')}</p>
+      <p className="mb-3 text-neutral-500">{t('dialogs.aiBackupsHint', { days: keepDays })}</p>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {items === null ? (
           <p className="text-neutral-500">{t('dialogs.loading')}</p>
@@ -84,51 +93,70 @@ export function AiBackupsDialog({
               <tr>
                 <th className="w-36 pb-1 font-normal">{t('dialogs.aiBackupTime')}</th>
                 <th className="w-24 pb-1 font-normal">{t('dialogs.aiBackupTool')}</th>
-                <th className="pb-1 font-normal">{t('dialogs.aiBackupPath')}</th>
+                <th className="pb-1 font-normal">{t('dialogs.aiBackupChange')}</th>
                 <th className="w-24 pb-1" />
               </tr>
             </thead>
             <tbody>
-              {items.map((b) => (
-                <tr key={b.id} className="border-t border-neutral-800 align-top">
-                  <td className="py-1 text-neutral-400">
-                    {new Date(b.createdAt).toLocaleString()}
-                  </td>
-                  <td className="py-1">{b.tool}</td>
-                  <td className="py-1">
-                    <div className="truncate font-mono" title={b.path}>
-                      {b.path}
-                    </div>
-                    <div className="text-neutral-500">
-                      {b.existed
-                        ? t('dialogs.aiBackupBefore', { bytes: b.bytes })
-                        : t('dialogs.aiBackupWasAbsent')}
-                    </div>
-                    {conflict?.id === b.id && (
-                      <div className="mt-1 text-amber-300">{conflict.error}</div>
-                    )}
-                  </td>
-                  <td className="py-1 text-right">
-                    {conflict?.id === b.id ? (
-                      <button
-                        className="rounded bg-red-700 px-2 py-0.5 text-white hover:bg-red-600 disabled:opacity-50"
-                        disabled={busy !== null}
-                        onClick={() => void restore(b.id, true)}
-                      >
-                        {t('dialogs.aiBackupForce')}
-                      </button>
-                    ) : (
-                      <button
-                        className="rounded bg-neutral-700 px-2 py-0.5 hover:bg-neutral-600 disabled:opacity-50"
-                        disabled={busy !== null}
-                        onClick={() => void restore(b.id, false)}
-                      >
-                        {t('dialogs.aiBackupRestore')}
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {items.map((b) => {
+                const summary = describeChange(b.change, t);
+                return (
+                  <tr key={b.id} className="border-t border-neutral-800 align-top">
+                    <td className="py-1 text-neutral-400">
+                      {new Date(b.createdAt).toLocaleString()}
+                    </td>
+                    <td className="py-1">{toolLabel(b.tool, t)}</td>
+                    <td className="py-1">
+                      {b.title && (
+                        <div
+                          className="flex items-baseline gap-1.5"
+                          title={t('dialogs.aiBackupAiTitleHint')}
+                        >
+                          <span className="shrink-0 rounded bg-neutral-800 px-1 text-[10px] text-neutral-400">
+                            {t('dialogs.aiBackupAiTitle')}
+                          </span>
+                          <span className="min-w-0 break-words text-neutral-100">{b.title}</span>
+                        </div>
+                      )}
+                      {summary && (
+                        <div className={b.title ? 'text-neutral-400' : 'text-neutral-100'}>
+                          {summary}
+                        </div>
+                      )}
+                      <div className="truncate font-mono text-neutral-400" title={b.path}>
+                        {b.path}
+                      </div>
+                      <div className="text-neutral-500">
+                        {b.existed
+                          ? t('dialogs.aiBackupBefore', { bytes: b.bytes })
+                          : t('dialogs.aiBackupWasAbsent')}
+                      </div>
+                      {conflict?.id === b.id && (
+                        <div className="mt-1 text-amber-300">{conflict.error}</div>
+                      )}
+                    </td>
+                    <td className="py-1 text-right">
+                      {conflict?.id === b.id ? (
+                        <button
+                          className="rounded bg-red-700 px-2 py-0.5 text-white hover:bg-red-600 disabled:opacity-50"
+                          disabled={busy !== null}
+                          onClick={() => void restore(b.id, true)}
+                        >
+                          {t('dialogs.aiBackupForce')}
+                        </button>
+                      ) : (
+                        <button
+                          className="rounded bg-neutral-700 px-2 py-0.5 hover:bg-neutral-600 disabled:opacity-50"
+                          disabled={busy !== null}
+                          onClick={() => void restore(b.id, false)}
+                        >
+                          {t('dialogs.aiBackupRestore')}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
