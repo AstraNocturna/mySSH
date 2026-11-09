@@ -12,8 +12,52 @@ import { feedOf } from '../term/exec-mirror';
 import { ContextMenu, type MenuItem } from '../components/ContextMenu';
 import { useT, tNow } from '../i18n';
 
+interface MirrorRuntime {
+  term: Terminal;
+  fit: FitAddon;
+  detach: () => void;
+}
+
+/** pane id → 镜像终端保活池：分屏结构变化导致重挂时复用同一 xterm，已显示的内容不丢 */
+const mirrorRuntimes = new Map<string, MirrorRuntime>();
+
+function createRuntime(paneId: string): MirrorRuntime {
+  const settings = useAppStore.getState().settings;
+  const opts = readTerminalSettings(settings);
+  const term = new Terminal({
+    scrollback: opts.scrollback,
+    fontFamily: opts.fontFamily,
+    fontSize: opts.fontSize,
+    allowProposedApi: true,
+    allowTransparency: true,
+    disableStdin: true,
+    cursorBlink: false,
+    theme: effectiveXtermTheme(
+      settings,
+      resolveTheme(
+        typeof settings['theme'] === 'string' ? settings['theme'] : 'one-dark',
+        typeof settings['theme.customJson'] === 'string' ? settings['theme.customJson'] : undefined,
+      ),
+    ),
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon());
+  term.loadAddon(new Unicode11Addon());
+  term.unicode.activeVersion = '11';
+  term.onSelectionChange(() => {
+    if (useAppStore.getState().settings['terminal.copyOnSelect'] === false) return;
+    const sel = term.getSelection();
+    if (sel) void writeText(sel).catch(() => undefined);
+  });
+  // 隐藏光标：只读视图没有输入位置
+  term.write(`\x1b[?25l\x1b[2m${tNow('chrome.mirrorBanner')}\x1b[0m\r\n\r\n`);
+  const detach = feedOf(paneId).attach((s) => term.write(s));
+  return { term, fit, detach };
+}
+
 /**
- * AI 命令镜像视图（只读）：显示 AI 经 ssh_exec / recipe_run 执行的命令、输出与退出码。
+ * AI 命令镜像（只读分屏）：显示 AI 经 ssh_exec / recipe_run 在本会话执行的命令、输出与退出码。
  * 不连接、不接收键盘输入；内容来自 exec-mirror 输出流（挂载前的输出已缓冲）。
  */
 export function MirrorView({ tab, pane }: { tab: Tab; pane: Pane }) {
@@ -24,45 +68,20 @@ export function MirrorView({ tab, pane }: { tab: Tab; pane: Pane }) {
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const settings = useAppStore.getState().settings;
-    const opts = readTerminalSettings(settings);
-    const term = new Terminal({
-      scrollback: opts.scrollback,
-      fontFamily: opts.fontFamily,
-      fontSize: opts.fontSize,
-      allowProposedApi: true,
-      allowTransparency: true,
-      disableStdin: true,
-      cursorBlink: false,
-      theme: effectiveXtermTheme(
-        settings,
-        resolveTheme(
-          typeof settings['theme'] === 'string' ? settings['theme'] : 'one-dark',
-          typeof settings['theme.customJson'] === 'string'
-            ? settings['theme.customJson']
-            : undefined,
-        ),
-      ),
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon());
-    const unicode = new Unicode11Addon();
-    term.loadAddon(unicode);
-    term.unicode.activeVersion = '11';
-    term.open(host);
+    let rt = mirrorRuntimes.get(pane.id);
+    if (rt) {
+      if (rt.term.element && rt.term.element.parentElement !== host)
+        host.appendChild(rt.term.element);
+    } else {
+      rt = createRuntime(pane.id);
+      mirrorRuntimes.set(pane.id, rt);
+      rt.term.open(host);
+    }
+    const { term, fit } = rt;
     fit.fit();
-    // 隐藏光标：只读视图没有输入位置
-    term.write(`\x1b[?25l\x1b[2m${tNow('chrome.mirrorBanner')}\x1b[0m\r\n\r\n`);
-    const detach = feedOf(tab.id).attach((s) => term.write(s));
     termRegistry.set(pane.id, term);
     fitRegistry.set(pane.id, () => {
       if (host.clientWidth > 0 && host.clientHeight > 0) fit.fit();
-    });
-    term.onSelectionChange(() => {
-      if (useAppStore.getState().settings['terminal.copyOnSelect'] === false) return;
-      const sel = term.getSelection();
-      if (sel) void writeText(sel).catch(() => undefined);
     });
     host.oncontextmenu = (e) => {
       e.preventDefault();
@@ -74,12 +93,18 @@ export function MirrorView({ tab, pane }: { tab: Tab; pane: Pane }) {
     observer.observe(host);
     return () => {
       observer.disconnect();
-      detach();
       termRegistry.delete(pane.id);
       fitRegistry.delete(pane.id);
-      term.dispose();
+      // pane 仍在 store = 布局重排重挂，留池复用；已移除 = 真关闭，释放
+      const alive = useAppStore.getState().tabs.some((x) => x.panes[pane.id] !== undefined);
+      if (!alive) {
+        const r = mirrorRuntimes.get(pane.id);
+        mirrorRuntimes.delete(pane.id);
+        r?.detach();
+        r?.term.dispose();
+      }
     };
-  }, [tab.id, pane.id]);
+  }, [pane.id]);
 
   const items = (canCopy: boolean): MenuItem[] => [
     {
@@ -94,9 +119,9 @@ export function MirrorView({ tab, pane }: { tab: Tab; pane: Pane }) {
     { label: t('state.menu.clearScreen'), onSelect: () => termRegistry.get(pane.id)?.clear() },
     'separator',
     {
-      label: t('chrome.menuClose'),
+      label: t('chrome.mirrorClose'),
       icon: '✕',
-      onSelect: () => useAppStore.getState().closeTab(tab.id),
+      onSelect: () => useAppStore.getState().closePane(tab.id, pane.id),
     },
   ];
 

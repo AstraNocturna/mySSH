@@ -203,7 +203,7 @@ export const enDialogs: Record<keyof typeof zhDialogs, string> = {
   'dialogs.mcpAllowSftpTransfer': 'SFTP upload/download (touches local files)',
   'dialogs.mcpExecMirror': 'AI command mirror',
   'dialogs.mcpExecMirrorHint':
-    'Show commands the AI runs (ssh_exec / recipe_run), with live output and exit codes, in a read-only "AI · host" tab',
+    'Show commands the AI runs (ssh_exec / recipe_run), with live output and exit codes, in a read-only split pane below the session terminal tab',
   'dialogs.mcpAllowTerminal':
     'Interactive terminal terminal_* (bypasses command policy, off by default)',
   'dialogs.mcpHint':

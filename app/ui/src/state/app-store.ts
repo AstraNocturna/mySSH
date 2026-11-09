@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import { TerminalSession } from '../term/terminal-session';
 import { GROUP_KEYS, readFailedList, readStringList, type FailedEntry } from './groups';
 import {
+  appendLeaf,
   firstLeaf,
   leaf,
   paneIds,
@@ -87,6 +88,8 @@ export interface Pane {
   id: string;
   session: TerminalSession;
   state: PaneState;
+  /** AI 命令镜像（只读分屏）：不连接，内容由 exec-mirror 帧写入 */
+  mirror?: boolean;
 }
 
 /** pane id → MCP terminal_open 请求 id：首次开链后回报后端（mcp_agent_tab_ready）并移除 */
@@ -130,8 +133,15 @@ export interface Tab {
   layout: LayoutNode;
   panes: Record<string, Pane>;
   activePaneId: string;
-  /** AI 命令镜像标签（只读）：所属会话 id。不连接、不可分屏，内容由 exec-mirror 帧写入 */
-  mirrorOf?: string;
+}
+
+/** 标签的主终端 pane：活动 pane 是镜像时取第一个真实终端（标签栏/状态栏的连接状态以它为准） */
+export function primaryPane(tab: Tab): Pane | undefined {
+  const active = tab.panes[tab.activePaneId];
+  if (active && !active.mirror) return active;
+  return paneIds(tab.layout)
+    .map((id) => tab.panes[id])
+    .find((p) => p && !p.mirror);
 }
 
 let tabSeq = 1;
@@ -337,17 +347,17 @@ export const useAppStore = create<AppStore>((set, get) => {
         const req = takeAgentRequest(pid);
         if (req) reportAgentTab(req, null, tNow('state.aiTabClosedByUser'));
         void tab.panes[pid]?.session.close();
+        mirrorFeeds.delete(pid);
       }
-    mirrorFeeds.delete(id);
     const next = tabs.filter((t) => t.id !== id);
     set((s) => ({
       tabs: next,
       activeId: activeId === id ? (next[next.length - 1]?.id ?? null) : activeId,
       bellTabs: s.bellTabs.filter((t) => t !== id),
       // 批次十一：session 类标签压入已关闭栈（cap 10），供 Ctrl+Shift+T 重开；
-      // 快速连接（spec）与 AI 命令镜像无连接可重开，不入栈
+      // 快速连接（spec）无档案可重连，不入栈
       closedTabs:
-        tab && tab.target.kind === 'session' && !tab.mirrorOf
+        tab && tab.target.kind === 'session'
           ? [...s.closedTabs, { sessionId: tab.target.sessionId, title: tab.title }].slice(-10)
           : s.closedTabs,
     }));
@@ -381,7 +391,11 @@ export const useAppStore = create<AppStore>((set, get) => {
   };
 
   /** agentRequestId 非空 = MCP agent 请求的标签：不抢焦点（已有活跃标签时），仅通知 */
-  const openTabWithTarget = (target: ConnectTarget, title: string, agentRequestId?: string) => {
+  const openTabWithTarget = (
+    target: ConnectTarget,
+    title: string,
+    agentRequestId?: string,
+  ): string => {
     const tabId = `${idPrefix}tab${tabSeq++}`;
     const pane = makePane(tabId);
     if (agentRequestId) {
@@ -400,7 +414,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         ],
         activeId: s.activeId ?? tabId,
       }));
-      return;
+      return tabId;
     }
     const tab: Tab = {
       id: tabId,
@@ -411,46 +425,71 @@ export const useAppStore = create<AppStore>((set, get) => {
       activePaneId: pane.id,
     };
     set((s) => ({ tabs: [...s.tabs, tab], activeId: tabId, showConnect: false }));
+    return tabId;
   };
 
-  /** 会话的 AI 命令镜像标签 id；没有则新建（首次出现时切到该标签，让用户看到 AI 在做什么） */
-  const ensureMirrorTab = (sessionId: string, sessionName: string): string => {
-    const found = get().tabs.find((t) => t.mirrorOf === sessionId);
-    if (found) return found.id;
-    const rec = get().sessions.find((r) => r.id === sessionId);
-    const tabId = `${idPrefix}tab${tabSeq++}`;
-    // pane 不 attach（无后端连接）；终态 closed：不计活跃连接、不进广播、关闭无需确认
-    const pane: Pane = { ...makePane(tabId), state: 'closed' };
-    const tab: Tab = {
-      id: tabId,
-      title: `AI · ${sessionName || rec?.name || sessionId}`,
-      target: {
-        kind: 'session',
-        sessionId,
-        sessionKind: 'ssh',
-        encoding: rec?.encoding ?? null,
-      },
-      layout: leaf(pane.id),
-      panes: { [pane.id]: pane },
-      activePaneId: pane.id,
-      mirrorOf: sessionId,
-    };
-    set((s) => ({ tabs: [...s.tabs, tab], activeId: tabId }));
-    return tabId;
+  const isSessionTab = (t: Tab, sessionId: string) =>
+    t.target.kind === 'session' && t.target.sessionId === sessionId;
+
+  /** 会话已有镜像 pane 的 id（执行中途用户关掉镜像则为 undefined） */
+  const findMirrorPane = (sessionId: string): string | undefined => {
+    for (const t of get().tabs) {
+      if (!isSessionTab(t, sessionId)) continue;
+      const p = Object.values(t.panes).find((x) => x.mirror);
+      if (p) return p.id;
+    }
+    return undefined;
+  };
+
+  /**
+   * 会话的 AI 命令镜像 pane：挂在该会话的终端标签里（下方只读分屏）。
+   * 优先当前标签，其次第一个该会话标签；都没有则先打开该会话的终端。
+   * 新挂镜像时切到所在标签（让用户看到 AI 在做什么），但不抢 pane 焦点。
+   */
+  const ensureMirrorPane = (sessionId: string, sessionName: string): string => {
+    const existing = findMirrorPane(sessionId);
+    if (existing) return existing;
+    const { tabs, activeId, sessions } = get();
+    const active = tabs.find((t) => t.id === activeId);
+    let tabId = (active && isSessionTab(active, sessionId) ? active : undefined)?.id;
+    tabId ??= tabs.find((t) => isSessionTab(t, sessionId))?.id;
+    if (!tabId) {
+      const rec = sessions.find((r) => r.id === sessionId);
+      tabId = openTabWithTarget(
+        { kind: 'session', sessionId, sessionKind: 'ssh', encoding: rec?.encoding ?? null },
+        rec?.name ?? sessionName,
+      );
+    }
+    // 不 attach（无后端连接）；终态 closed：不计活跃连接、不进广播、关闭无需确认
+    const pane: Pane = { ...makePane(tabId), state: 'closed', mirror: true };
+    const target = tabId;
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === target
+          ? {
+              ...t,
+              layout: appendLeaf(t.layout, 'col', pane.id, 0.6),
+              panes: { ...t.panes, [pane.id]: pane },
+            }
+          : t,
+      ),
+      activeId: target,
+    }));
+    return pane.id;
   };
 
   const onExecMirror = (frame: ExecMirrorFrame) => {
     // 只在主窗口汇入，避免分离窗口重复开标签
     if (windowLabel !== 'main') return;
     if (frame.type === 'exec_start') {
-      const tabId = ensureMirrorTab(frame.sessionId, frame.sessionName);
-      feedOf(tabId).write(formatStart(frame, new Date()));
+      const paneId = ensureMirrorPane(frame.sessionId, frame.sessionName);
+      feedOf(paneId).write(formatStart(frame, new Date()));
       return;
     }
-    // 执行中途用户关了镜像标签：其余输出丢弃，下条命令再开
-    const tab = get().tabs.find((t) => t.mirrorOf === frame.sessionId);
-    if (!tab) return;
-    const feed = feedOf(tab.id);
+    // 执行中途用户关了镜像：其余输出丢弃，下条命令再挂
+    const paneId = findMirrorPane(frame.sessionId);
+    if (!paneId) return;
+    const feed = feedOf(paneId);
     if (frame.type === 'exec_output') feed.write(formatOutput(frame));
     else
       feed.write(
@@ -667,7 +706,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
     connectOrActivate: (sessionId, title) => {
       const existing = get().tabs.find(
-        (t) => t.target.kind === 'session' && t.target.sessionId === sessionId && !t.mirrorOf,
+        (t) => t.target.kind === 'session' && t.target.sessionId === sessionId,
       );
       if (existing) set({ activeId: existing.id });
       else get().connectBySession(sessionId, title);
@@ -976,7 +1015,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     splitActive: (dir) => {
       const { tabs, activeId } = get();
       const tab = tabs.find((t) => t.id === activeId);
-      if (!tab || tab.mirrorOf) return;
+      if (!tab) return;
       const pane = makePane(tab.id);
       // 6b：新 pane 复用 tab.target（TerminalView 以同一 target attach = 同服务器新通道）。
       // 不再注入 cd 继承源 pane cwd（注入移除，见 makePane 内说明）
@@ -999,16 +1038,20 @@ export const useAppStore = create<AppStore>((set, get) => {
       const tab = tabs.find((t) => t.id === tabId);
       if (!tab) return;
       const layout = removeLeaf(tab.layout, paneId);
-      if (!layout) {
-        // 最后一叶：走整标签关闭入口（含活跃连接确认守卫；
-        // session 统一由确认后的 doCloseTab 关闭，避免取消确认留下僵尸 pane）
+      // 最后一叶（或只剩 AI 镜像）：走整标签关闭入口（含活跃连接确认守卫；
+      // session 统一由确认后的 doCloseTab 关闭，避免取消确认留下僵尸 pane）
+      if (!layout || paneIds(layout).every((id) => tab.panes[id]?.mirror)) {
         get().closeTab(tabId);
         return;
       }
       const pane = tab.panes[paneId];
       if (pane) void pane.session.close();
+      mirrorFeeds.delete(paneId);
       const panes = Object.fromEntries(Object.entries(tab.panes).filter(([k]) => k !== paneId));
-      const activePaneId = tab.activePaneId === paneId ? firstLeaf(layout) : tab.activePaneId;
+      const activePaneId =
+        tab.activePaneId === paneId
+          ? (paneIds(layout).find((id) => !panes[id]?.mirror) ?? firstLeaf(layout))
+          : tab.activePaneId;
       set((s) => ({
         tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, layout, panes, activePaneId } : t)),
       }));

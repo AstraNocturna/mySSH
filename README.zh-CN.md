@@ -40,7 +40,7 @@
 | 工具 | 说明 |
 | --- | --- |
 | `list_sessions` | 列出会话档案（不含凭据），并附上每个会话对 AI 的有效授权（档位、生产标记、各工具组是否放行）、已打开的标签数，以及 AI 可直接使用的终端（含你共享给 AI 的标签） |
-| `ssh_exec` | 在会话上执行 shell 命令，返回 stdout/stderr/exit code。命令按会话的访问档位过内置策略分类器；高风险命令弹出应用内确认框（调用可能返回 `pending_approval`，用相同参数重试即继续等待）。按会话限速，全部尝试落审计。输出省 token：剥离 ANSI 序列，超长输出保留头尾。窗口在线时，命令、实时输出和退出码同步显示在「AI · 主机」只读标签里（设置 → MCP →「AI 命令镜像」可关闭） |
+| `ssh_exec` | 在会话上执行 shell 命令，返回 stdout/stderr/exit code。命令按会话的访问档位过内置策略分类器；高风险命令弹出应用内确认框（调用可能返回 `pending_approval`，用相同参数重试即继续等待）。按会话限速，全部尝试落审计。输出省 token：剥离 ANSI 序列，超长输出保留头尾。窗口在线时，命令、实时输出和退出码同步显示在该会话终端标签下方的只读分屏里（会话未打开时自动打开；设置 → MCP →「AI 命令镜像」可关闭） |
 | `sftp_home` / `sftp_list` / `sftp_stat` / `sftp_read` | 远端浏览与读文件 |
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | 远端写入与元操作（落审计） |
 | `sftp_upload` / `sftp_download` | 文件传输：入队后台传输队列执行（与 UI 传输面板共享，**无大小上限**；`wait_seconds` 可同步等待终态） |
