@@ -113,6 +113,17 @@ impl TerminalManager {
         Ok((tap, s.session_id.clone()))
     }
 
+    /// 会话档案 id → mySSH 窗口里打开的终端标签数（分屏每个 pane 各计一个）
+    pub(crate) fn tabs_by_session(&self) -> HashMap<String, usize> {
+        let mut out = HashMap::new();
+        for s in self.sessions.lock().values() {
+            if let Some(sid) = &s.session_id {
+                *out.entry(sid.clone()).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
     /// 标签所属会话档案 id（临时连接为 None）
     pub(crate) fn session_of_tab(&self, tab_id: &str) -> Option<String> {
         self.sessions

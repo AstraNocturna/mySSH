@@ -53,6 +53,10 @@ export const zhChrome = {
   'chrome.menuCloseRight': '关闭右侧',
   'chrome.menuCloseAll': '关闭全部',
   'chrome.bellTitle': '终端响铃',
+  'chrome.mirrorBanner':
+    'AI 命令镜像（只读）：AI 在此会话上执行的命令、输出和退出码实时显示在这里。可在 设置 → MCP 关闭。',
+  'chrome.mirrorTitle': 'AI 命令镜像（只读）',
+  'chrome.mirrorOpenSession': '打开该会话的终端',
   'chrome.aiAgentTitle': 'AI 打开的终端：可旁观，你键入时 AI 暂停写入，右键可收回控制',
   'chrome.aiSharedTitle': '已共享给 AI：右键终端可收回控制',
   'chrome.updateTitle': '发现新版本 v{version}',

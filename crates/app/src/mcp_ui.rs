@@ -215,6 +215,111 @@ impl McpUiHub {
     }
 }
 
+/// 单次命令镜像推送上限：超出后只计数不再推送（镜像只为旁观，完整结果仍回给 agent）
+const MIRROR_CAP: usize = 512 * 1024;
+
+#[derive(Default)]
+struct MirrorBuf {
+    out: Vec<u8>,
+    err: Vec<u8>,
+    sent: usize,
+    omitted: usize,
+}
+
+/// ssh_exec / recipe_run 的只读镜像：开始、流式输出、结束三类帧推给前端，
+/// 前端按会话汇入「AI · 主机」只读标签。窗口不在线时不创建。
+pub(crate) struct ExecMirror {
+    hub: Arc<McpUiHub>,
+    id: String,
+    session_id: String,
+    buf: Mutex<MirrorBuf>,
+}
+
+impl ExecMirror {
+    pub(crate) fn begin(
+        hub: &Arc<McpUiHub>,
+        session_id: &str,
+        session_name: &str,
+        tool: &str,
+        command: &str,
+    ) -> Option<Self> {
+        let id = random_id();
+        let sent = hub.emit(&json!({
+            "type": "exec_start",
+            "execId": id,
+            "sessionId": session_id,
+            "sessionName": session_name,
+            "tool": tool,
+            "command": command,
+        }));
+        sent.then(|| Self {
+            hub: hub.clone(),
+            id,
+            session_id: session_id.to_string(),
+            buf: Mutex::new(MirrorBuf::default()),
+        })
+    }
+
+    pub(crate) fn push(&self, stderr: bool, data: &[u8]) {
+        let text = {
+            let mut b = self.buf.lock();
+            if b.sent >= MIRROR_CAP {
+                b.omitted += data.len();
+                return;
+            }
+            let room = MIRROR_CAP - b.sent;
+            let take = data.len().min(room);
+            b.sent += take;
+            b.omitted += data.len() - take;
+            let carry = if stderr { &mut b.err } else { &mut b.out };
+            carry.extend_from_slice(&data[..take]);
+            crate::recording::take_utf8(carry, false)
+        };
+        self.emit_output(stderr, text);
+    }
+
+    fn emit_output(&self, stderr: bool, data: String) {
+        if data.is_empty() {
+            return;
+        }
+        self.hub.emit(&json!({
+            "type": "exec_output",
+            "execId": self.id,
+            "sessionId": self.session_id,
+            "stream": if stderr { "stderr" } else { "stdout" },
+            "data": data,
+        }));
+    }
+
+    /// status: ok / error / timeout；error 为失败原因
+    pub(crate) fn finish(
+        self,
+        status: &str,
+        exit_code: Option<u64>,
+        duration_ms: u64,
+        error: Option<&str>,
+    ) {
+        let (out, err, omitted) = {
+            let mut b = self.buf.lock();
+            let out = crate::recording::take_utf8(&mut b.out, true);
+            let err = crate::recording::take_utf8(&mut b.err, true);
+            (out, err, b.omitted)
+        };
+        self.emit_output(false, out);
+        self.emit_output(true, err);
+        self.hub.emit(&json!({
+            "type": "exec_end",
+            "execId": self.id,
+            "sessionId": self.session_id,
+            "status": status,
+            "exitCode": exit_code,
+            "durationMs": duration_ms,
+            "error": error,
+            "omittedBytes": omitted,
+        }));
+    }
+}
+
 /// 前端订阅 MCP 交互事件（审批请求等）；窗口重载后再次调用替换旧通道
 #[tauri::command]
 pub async fn mcp_ui_subscribe(
@@ -353,6 +458,41 @@ mod tests {
             McpUiHub::new().request_tab("s", "web").is_err(),
             "无前端订阅不能开标签"
         );
+    }
+
+    #[test]
+    fn exec_mirror_streams_and_caps() {
+        assert!(
+            ExecMirror::begin(&McpUiHub::new(), "s", "web", "ssh_exec", "ls").is_none(),
+            "无窗口不镜像"
+        );
+        let (hub, seen) = hub_with_sink();
+        let m = ExecMirror::begin(&hub, "s", "web", "ssh_exec", "ls").unwrap();
+        // "中" = E4 B8 AD：拆在两块之间不能出乱码
+        m.push(false, b"a\xe4\xb8");
+        m.push(false, b"\xad\n");
+        m.push(true, b"oops");
+        m.push(false, &vec![b'x'; MIRROR_CAP]);
+        m.push(false, b"tail");
+        m.finish("ok", Some(0), 12, None);
+        let frames = seen.lock().clone();
+        assert_eq!(frames[0]["type"], "exec_start");
+        assert_eq!(frames[0]["command"], "ls");
+        let out: String = frames
+            .iter()
+            .filter(|f| f["type"] == "exec_output" && f["stream"] == "stdout")
+            .map(|f| f["data"].as_str().unwrap().to_string())
+            .collect();
+        assert!(out.starts_with("a中\n"));
+        assert!(!out.contains('\u{FFFD}'));
+        assert!(frames
+            .iter()
+            .any(|f| f["stream"] == "stderr" && f["data"] == "oops"));
+        let end = frames.last().unwrap();
+        assert_eq!(end["type"], "exec_end");
+        assert_eq!(end["exitCode"], 0);
+        // 先收 3+2+4=9 字节，x 块只收余量 MIRROR_CAP-9，其余 9 字节与 "tail" 4 字节省略
+        assert_eq!(end["omittedBytes"], 13);
     }
 
     #[test]

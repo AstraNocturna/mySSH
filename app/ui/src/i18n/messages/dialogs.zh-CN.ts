@@ -193,6 +193,9 @@ export const zhDialogs = {
   'dialogs.clearDownloadDir': '清除',
   'dialogs.browseFailed': '打开目录选择框失败：{error}',
   'dialogs.mcpAllowSftpTransfer': 'SFTP 上传/下载（读写本地文件）',
+  'dialogs.mcpExecMirror': 'AI 命令镜像',
+  'dialogs.mcpExecMirrorHint':
+    'AI 执行命令（ssh_exec / recipe_run）时，在「AI · 主机」只读标签中实时显示命令、输出和退出码',
   'dialogs.mcpAllowTerminal': '交互终端 terminal_*（不经命令策略，默认关闭）',
   'dialogs.mcpHint':
     'AI 客户端（如 Claude Code）接入：POST http://127.0.0.1:<端口>/mcp，请求头 Authorization: Bearer <令牌>。勾选启用后自动生成令牌；仅监听本机回环。',
