@@ -4,9 +4,11 @@
 //! 推 `approval_request` 帧，用户在弹窗里批准/拒绝（`mcp_approve`）。agent 侧同步
 //! 等待一段时间，未决则返回 pending——同会话同命令再次调用即续等同一审批项，
 //! 无需额外的 confirm id 往返。审批项一次性消费，超过 TTL 视为拒绝。
+//! 用户选「总是允许」时记下（会话, 完全相同的命令），之后同会话同命令免确认；
+//! 规则只在内存，应用重启即失效。
 //! 通道不存在（窗口未就绪/无前端，如测试）时审批不可用，调用方 fail-closed。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,6 +44,8 @@ type TabResult = Result<String, String>;
 pub struct McpUiHub {
     sink: Mutex<Option<UiSink>>,
     approvals: Mutex<HashMap<String, Approval>>,
+    /// 「总是允许」规则：(会话 id, 完全相同的命令)
+    always: Mutex<HashSet<(String, String)>>,
     /// agent terminal_open 请前端开标签：requestId → 结果回传
     tab_waiters: Mutex<HashMap<String, oneshot::Sender<TabResult>>>,
 }
@@ -202,6 +206,26 @@ impl McpUiHub {
         }
     }
 
+    /// 批准并记下「总是允许」规则；未知/已过期审批项返回 false 且不记规则
+    pub(crate) fn allow_always(&self, id: &str) -> bool {
+        let key = {
+            let map = self.approvals.lock();
+            match map.get(id) {
+                Some(a) if a.deadline > Instant::now() => (a.session_id.clone(), a.command.clone()),
+                _ => return false,
+            }
+        };
+        self.always.lock().insert(key);
+        self.decide(id, true)
+    }
+
+    /// 同会话同命令是否已被用户「总是允许」
+    pub(crate) fn is_always_allowed(&self, session_id: &str, command: &str) -> bool {
+        self.always
+            .lock()
+            .contains(&(session_id.to_string(), command.to_string()))
+    }
+
     /// 用户决定；未知/已过期审批项返回 false
     pub(crate) fn decide(&self, id: &str, allow: bool) -> bool {
         let map = self.approvals.lock();
@@ -330,13 +354,17 @@ pub async fn mcp_ui_subscribe(
     Ok(())
 }
 
-/// 用户对审批项的决定
+/// 用户对审批项的决定；always = 批准且本会话此命令以后免确认（至应用重启）
 #[tauri::command]
 pub async fn mcp_approve(
     hub: tauri::State<'_, Arc<McpUiHub>>,
     id: String,
     allow: bool,
+    always: Option<bool>,
 ) -> Result<bool, String> {
+    if allow && always == Some(true) {
+        return Ok(hub.allow_always(&id));
+    }
     Ok(hub.decide(&id, allow))
 }
 
@@ -493,6 +521,28 @@ mod tests {
         assert_eq!(end["exitCode"], 0);
         // 先收 3+2+4=9 字节，x 块只收余量 MIRROR_CAP-9，其余 9 字节与 "tail" 4 字节省略
         assert_eq!(end["omittedBytes"], 13);
+    }
+
+    #[tokio::test]
+    async fn allow_always_records_exact_command_per_session() {
+        let (hub, _) = hub_with_sink();
+        let id = hub
+            .request("s", "systemctl restart nginx", json!({}))
+            .unwrap();
+        assert!(!hub.is_always_allowed("s", "systemctl restart nginx"));
+        assert!(hub.allow_always(&id));
+        assert_eq!(
+            hub.wait(&id, Duration::from_millis(10)).await,
+            ApprovalWait::Approved
+        );
+        assert!(hub.is_always_allowed("s", "systemctl restart nginx"));
+        // 只认同会话 + 完全相同的命令
+        assert!(!hub.is_always_allowed("other", "systemctl restart nginx"));
+        assert!(!hub.is_always_allowed("s", "systemctl restart nginx "));
+        assert!(!hub.is_always_allowed("s", "systemctl restart mysql"));
+        // 已消费/未知审批项不能借机记规则
+        assert!(!hub.allow_always(&id));
+        assert!(!hub.allow_always("nope"));
     }
 
     #[test]

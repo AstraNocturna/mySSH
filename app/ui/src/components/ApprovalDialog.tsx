@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 import { Dialog } from './Dialog';
 import { useT } from '../i18n';
+import { commandHelpKey, opKey, RISK_CLASS, RISK_KEY } from './approval-help';
 
 /**
  * MCP 危险命令审批弹窗（安全模型第 2 条的人工确认通道）。
@@ -29,6 +30,7 @@ export function ApprovalDialog() {
   if (!pending) return null;
   const deny = () => answer(pending.id, false);
   const prod = pending.production === true;
+  const parts = pending.parts ?? [];
 
   return (
     <Dialog
@@ -38,7 +40,7 @@ export function ApprovalDialog() {
       onClose={deny}
       closeOnBackdrop={false}
       backdropClass="z-20"
-      panelClass={`w-[32rem] rounded-lg border p-4 text-sm shadow-xl ${
+      panelClass={`w-[36rem] rounded-lg border p-4 text-sm shadow-xl ${
         prod
           ? 'border-red-700 bg-red-950 text-red-100'
           : 'border-amber-700 bg-neutral-900 text-neutral-200'
@@ -60,20 +62,57 @@ export function ApprovalDialog() {
           {t('dialogs.approvalLevel', { level: pending.level })}
         </p>
       )}
-      <pre className="mb-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-black/50 p-2 font-mono text-xs">
+      {pending.purpose && (
+        <div className="mb-2 rounded border border-sky-800/60 bg-sky-950/40 p-2 text-xs">
+          <div className="mb-0.5 text-sky-300">{t('dialogs.approvalPurpose')}</div>
+          <div className="whitespace-pre-wrap break-words text-neutral-200">{pending.purpose}</div>
+        </div>
+      )}
+      <pre className="mb-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-black/50 p-2 font-mono text-xs">
         {pending.command}
       </pre>
+      {parts.length > 0 && (
+        <div className="mb-2">
+          <div className="mb-1 text-xs text-neutral-400">{t('dialogs.approvalParts')}</div>
+          <ol className="max-h-56 space-y-1 overflow-auto">
+            {parts.map((p, i) => {
+              const help = commandHelpKey(p.head, p.sub);
+              const op = opKey(p.op);
+              return (
+                <li key={i} className="rounded bg-black/30 px-2 py-1 text-xs">
+                  <div className="flex items-start gap-2">
+                    <code className="min-w-0 flex-1 break-all font-mono">{p.text}</code>
+                    <span className={`shrink-0 rounded px-1.5 text-[11px] ${RISK_CLASS[p.risk]}`}>
+                      {t(RISK_KEY[p.risk])}
+                    </span>
+                  </div>
+                  <div className={help ? 'text-neutral-300' : 'text-neutral-500'}>
+                    {help ? t(help) : t('dialogs.approvalNoHelp')}
+                  </div>
+                  {op && <div className="text-[11px] text-neutral-500">↳ {t(op)}</div>}
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
       <p className="mb-3 text-xs text-neutral-400">
         {t('dialogs.approvalHint', { sec: Math.max(0, Math.ceil(remainingMs / 1000)) })}
         {queued > 0 && <> · {t('dialogs.approvalQueue', { count: queued })}</>}
       </p>
-      <div className="flex justify-end gap-2">
+      <div className="flex items-center justify-end gap-2">
         <button
           data-autofocus
           className="rounded bg-neutral-700 px-3 py-1 hover:bg-neutral-600"
           onClick={deny}
         >
           {t('dialogs.approvalDeny')}
+        </button>
+        <button
+          className="rounded border border-neutral-600 px-3 py-1 hover:bg-neutral-800"
+          onClick={() => answer(pending.id, true, true)}
+        >
+          {t('dialogs.approvalAlways')}
         </button>
         <button
           className={`rounded px-3 py-1 text-white ${
@@ -84,6 +123,9 @@ export function ApprovalDialog() {
           {t('dialogs.approvalAllow')}
         </button>
       </div>
+      <p className="mt-2 text-right text-[11px] text-neutral-500">
+        {t('dialogs.approvalAlwaysHint')}
+      </p>
     </Dialog>
   );
 }

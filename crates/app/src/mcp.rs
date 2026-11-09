@@ -761,6 +761,10 @@ fn tools_list(perms: &McpPerms) -> Value {
                             "maximum": 120000,
                             "default": 30000
                         },
+    "purpose": {
+                            "type": "string",
+                            "description": "可选：一句话说明这条命令要做什么、为什么（≤300 字）。需用户确认时显示在审批框里（标注为 AI 自述），不影响安全判定"
+                        },
                         "strip_ansi": {
                             "type": "boolean",
                             "default": true,
@@ -803,6 +807,7 @@ fn tools_list(perms: &McpPerms) -> Value {
                     "properties": {
                         "session_id": { "type": "string", "description": "会话档案 id（list_sessions 返回的 id）" },
                         "command": { "type": "string", "description": "要在远端后台执行的 shell 命令" },
+                        "purpose": { "type": "string", "description": "可选：一句话说明这条命令要做什么、为什么（≤300 字）。需用户确认时显示在审批框里（标注为 AI 自述），不影响安全判定" },
                         "pty": { "type": "boolean", "default": true, "description": "分配伪终端（TERM=dumb）：job_stop 时远端进程能收到挂断；false 则 stdout/stderr 原样不经终端" }
                     },
                     "required": ["session_id", "command"],
@@ -1384,7 +1389,17 @@ async fn ssh_exec_tool(st: &ServerState, args: &Value) -> Result<String, String>
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
-    if let Gate::Pending(resp) = exec_gate(st, session_id, command, "ssh_exec", None).await? {
+    let purpose = purpose_arg(args);
+    if let Gate::Pending(resp) = exec_gate(
+        st,
+        session_id,
+        command,
+        "ssh_exec",
+        None,
+        purpose.as_deref(),
+    )
+    .await?
+    {
         return Ok(resp);
     }
 
@@ -1492,8 +1507,15 @@ async fn recipe_run_tool(st: &ServerState, args: &Value) -> Result<String, Strin
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_TIMEOUT_MS)
         .clamp(1, MAX_TIMEOUT_MS);
-    if let Gate::Pending(resp) =
-        exec_gate(st, session_id, &command, "recipe_run", Some(recipe.risk)).await?
+    if let Gate::Pending(resp) = exec_gate(
+        st,
+        session_id,
+        &command,
+        "recipe_run",
+        Some(recipe.risk),
+        None,
+    )
+    .await?
     {
         return Ok(resp);
     }
@@ -1507,6 +1529,12 @@ async fn recipe_run_tool(st: &ServerState, args: &Value) -> Result<String, Strin
     body["command"] = json!(command);
     serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
 }
+/// agent 自述的命令用途（审批框展示，不参与判定）：去空白，截断到 300 字符
+fn purpose_arg(args: &Value) -> Option<String> {
+    let p = args.get("purpose").and_then(Value::as_str)?.trim();
+    (!p.is_empty()).then(|| p.chars().take(300).collect())
+}
+
 enum Gate {
     /// 放行，继续执行
     Go,
@@ -1522,6 +1550,7 @@ async fn exec_gate(
     command: &str,
     tool: &str,
     recipe_risk: Option<crate::mcp_recipes::Risk>,
+    purpose: Option<&str>,
 ) -> Result<Gate, String> {
     let action = format!("mcp_{tool}");
     // 安全模型第 6 条：每会话命令速率上限（拒绝也计数，防探测洪泛）
@@ -1547,8 +1576,25 @@ async fn exec_gate(
     let deny_reason = match verdict {
         Verdict::Allow => None,
         Verdict::Deny => Some(format!("命令超出只读白名单（当前为 {level} 档）")),
+        // 用户此前对本会话同一命令选过「总是允许」
+        Verdict::RequireConfirmation if st.ui.is_always_allowed(session_id, command) => {
+            mcp_audit(
+                st,
+                session_id,
+                &action,
+                &json!({ "command": command, "result": "approved", "rule": "always" }),
+            )
+            .await;
+            None
+        }
         Verdict::RequireConfirmation => {
-            match confirm_exec(st, session_id, rec.as_ref(), command, &eff, &action).await {
+            let ask = Ask {
+                rec: rec.as_ref(),
+                eff: &eff,
+                action: &action,
+                purpose,
+            };
+            match confirm_exec(st, session_id, command, ask).await {
                 Confirm::Approved => None,
                 Confirm::Denied(reason) => Some(reason),
                 Confirm::Pending(id) => {
@@ -1590,7 +1636,10 @@ async fn job_tool(st: &ServerState, name: &str, args: &Value) -> Result<String, 
             let session_id = req_str(args, "session_id", name)?;
             let command = req_str(args, "command", name)?;
             let pty = args.get("pty").and_then(Value::as_bool).unwrap_or(true);
-            if let Gate::Pending(resp) = exec_gate(st, session_id, command, name, None).await? {
+            let purpose = purpose_arg(args);
+            if let Gate::Pending(resp) =
+                exec_gate(st, session_id, command, name, None, purpose.as_deref()).await?
+            {
                 return Ok(resp);
             }
             let target = crate::sessions::resolve_session_target(&st.store, session_id).await?;
@@ -1653,25 +1702,48 @@ enum Confirm {
     Pending(String),
 }
 
-/// 需人工确认的命令：推审批弹窗并等待用户决定
-async fn confirm_exec(
-    st: &ServerState,
-    session_id: &str,
-    rec: Option<&core_store::SessionRecord>,
-    command: &str,
-    eff: &crate::mcp_policy::Effective,
-    action: &str,
-) -> Confirm {
+/// 审批弹窗的上下文
+struct Ask<'a> {
+    rec: Option<&'a core_store::SessionRecord>,
+    eff: &'a crate::mcp_policy::Effective,
+    action: &'a str,
+    purpose: Option<&'a str>,
+}
+
+/// 需人工确认的命令：推审批弹窗（附逐段风险分析与 agent 自述用途）并等待用户决定
+async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: Ask<'_>) -> Confirm {
+    let Ask {
+        rec,
+        eff,
+        action,
+        purpose,
+    } = ask;
     // 会话不存在不弹窗：用户无从判断，且后续解析必然失败
     let Some(rec) = rec else {
         return Confirm::Denied("命令需人工确认，且会话不存在".into());
     };
+    let parts: Vec<Value> = st
+        .policy
+        .explain(command)
+        .into_iter()
+        .map(|p| {
+            json!({
+                "text": p.text,
+                "op": p.op,
+                "head": p.head,
+                "sub": p.sub,
+                "risk": p.risk.as_str(),
+            })
+        })
+        .collect();
     let event = json!({
         "sessionName": rec.name,
         "host": rec.host,
         "user": rec.user,
         "level": crate::mcp_policy::level_str(eff.level),
         "production": eff.production,
+        "parts": parts,
+        "purpose": purpose,
     });
     let id = match st.ui.request(session_id, command, event) {
         Ok(id) => id,
@@ -1683,7 +1755,12 @@ async fn confirm_exec(
                 st,
                 session_id,
                 action,
-                &json!({ "command": command, "result": "approved", "approvalId": id }),
+                &json!({
+                    "command": command,
+                    "result": "approved",
+                    "approvalId": id,
+                    "always": st.ui.is_always_allowed(session_id, command),
+                }),
             )
             .await;
             Confirm::Approved
@@ -2426,8 +2503,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let args =
-            |sid: &str| json!({ "session_id": sid, "command": "touch /tmp/x", "timeout_ms": 3000 });
+        let args = |sid: &str| {
+            json!({
+                "session_id": sid,
+                "command": "touch /tmp/x && ls",
+                "timeout_ms": 3000,
+                "purpose": "  建一个标记文件  ",
+            })
+        };
 
         // 无前端订阅：需确认的命令 fail-closed
         let st = test_state(store.clone(), crate::mcp_ui::McpUiHub::new());
@@ -2437,8 +2520,8 @@ mod tests {
         let e = ssh_exec_tool(&st, &args("dev")).await.unwrap_err();
         assert!(e.contains("readonly"), "{e}");
 
-        // 有前端订阅：收到带生产标记的审批帧，按 allow 决定
-        for allow in [false, true] {
+        // 有前端订阅：收到带生产标记的审批帧，按 allow 决定；always = 「总是允许」
+        for (allow, always) in [(false, false), (true, false), (true, true)] {
             let hub = crate::mcp_ui::McpUiHub::new();
             let frames = Arc::new(Mutex::new(Vec::<Value>::new()));
             let fs = frames.clone();
@@ -2455,7 +2538,11 @@ mod tests {
                         .first()
                         .map(|v| v["id"].as_str().unwrap().to_string());
                     if let Some(id) = id {
-                        assert!(h.decide(&id, allow));
+                        if always {
+                            assert!(h.allow_always(&id));
+                        } else {
+                            assert!(h.decide(&id, allow));
+                        }
                         return;
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2468,6 +2555,39 @@ mod tests {
             assert_eq!(frame["production"], true);
             assert_eq!(frame["level"], "standard");
             assert_eq!(frame["sessionName"], "prod");
+            // 逐段分析 + agent 自述用途（去空白）
+            assert_eq!(frame["purpose"], "建一个标记文件");
+            assert_eq!(
+                frame["parts"],
+                json!([
+                    { "text": "touch /tmp/x", "op": "&&", "head": "touch", "sub": "/tmp/x", "risk": "write" },
+                    { "text": "ls", "op": null, "head": "ls", "sub": null, "risk": "readonly" },
+                ])
+            );
+            if always {
+                // 同会话同命令再调用：不再弹窗、不被策略拦截
+                let e = ssh_exec_tool(&st, &args("prod")).await.unwrap_err();
+                assert!(!e.contains("安全策略"), "总是允许后不应再拦截: {e}");
+                let asks = frames
+                    .lock()
+                    .iter()
+                    .filter(|f| f["type"] == "approval_request")
+                    .count();
+                assert_eq!(asks, 1, "总是允许后不应再弹审批");
+                // 其他命令照常弹窗等待确认
+                let mut other = args("prod");
+                other["command"] = json!("touch /tmp/y");
+                let waited =
+                    tokio::time::timeout(Duration::from_millis(100), ssh_exec_tool(&st, &other))
+                        .await;
+                assert!(waited.is_err(), "未决定的审批不应返回");
+                let asks = frames
+                    .lock()
+                    .iter()
+                    .filter(|f| f["type"] == "approval_request")
+                    .count();
+                assert_eq!(asks, 2, "其他命令仍需确认");
+            }
             let e = r.unwrap_err();
             if allow {
                 // 放行后进入建连（端口 1 必然失败），不再是策略拒绝

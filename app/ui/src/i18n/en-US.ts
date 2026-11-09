@@ -1,5 +1,6 @@
 import type { MsgKey } from './zh-CN';
 import { enChrome } from './messages/chrome.en-US';
+import { enCommands } from './messages/commands.en-US';
 import { enDialogs } from './messages/dialogs.en-US';
 import { enPanels } from './messages/panels.en-US';
 import { enState } from './messages/state.en-US';
@@ -8,6 +9,7 @@ import { enState } from './messages/state.en-US';
 export const enUS: Record<MsgKey, string> = {
   'app.title': 'mySSH',
   ...enChrome,
+  ...enCommands,
   ...enDialogs,
   ...enPanels,
   ...enState,
