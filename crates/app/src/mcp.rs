@@ -1732,6 +1732,10 @@ async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: As
                 "op": p.op,
                 "head": p.head,
                 "sub": p.sub,
+                "wrapper": p.wrapper,
+                "writes": p.writes,
+                "append": p.append,
+                "heredocLines": p.heredoc_lines,
                 "risk": p.risk.as_str(),
             })
         })
@@ -2560,8 +2564,16 @@ mod tests {
             assert_eq!(
                 frame["parts"],
                 json!([
-                    { "text": "touch /tmp/x", "op": "&&", "head": "touch", "sub": "/tmp/x", "risk": "write" },
-                    { "text": "ls", "op": null, "head": "ls", "sub": null, "risk": "readonly" },
+                    {
+                        "text": "touch /tmp/x", "op": "&&", "head": "touch", "sub": "/tmp/x",
+                        "wrapper": null, "writes": null, "append": false, "heredocLines": 0,
+                        "risk": "write"
+                    },
+                    {
+                        "text": "ls", "op": null, "head": "ls", "sub": null,
+                        "wrapper": null, "writes": null, "append": false, "heredocLines": 0,
+                        "risk": "readonly"
+                    },
                 ])
             );
             if always {

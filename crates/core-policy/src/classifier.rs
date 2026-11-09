@@ -176,22 +176,21 @@ impl PolicyEngine {
     }
 
     /// 审批展示用：按顶层 `| || && ; &` 与换行把复合命令切成原文片段，逐段给出
-    /// 主命令名与风险（与 `classify` 同一判定）。结构无法解析时整条作为一段 Unparsed。
+    /// 主命令名、写入的文件与风险（与 `classify` 同一单段判定）。heredoc 正文是数据，
+    /// 不切成命令。结构无法解析时整条作为一段 Unparsed。
     pub fn explain(&self, cmd: &str) -> Vec<CommandPart> {
         let whitelist = self.whitelist();
         let blacklist = self.blacklist();
         let Ok(raw) = split_top_level(cmd) else {
             return vec![CommandPart {
                 text: cmd.trim().to_string(),
-                op: None,
-                head: None,
-                sub: None,
                 risk: PartRisk::Unparsed,
+                ..CommandPart::default()
             }];
         };
         raw.into_iter()
-            .map(|(text, op)| {
-                let risk = match split_subcommands(&text) {
+            .map(|p| {
+                let mut risk = match split_subcommands(&p.scan) {
                     Ok(subs) => subs
                         .iter()
                         .map(|s| sub_risk(s, &whitelist, &blacklist))
@@ -199,20 +198,20 @@ impl PolicyEngine {
                         .unwrap_or(PartRisk::ReadOnly),
                     Err(()) => PartRisk::Unparsed,
                 };
-                let (head, sub) = match split_command(&text) {
-                    Some((h, args)) => (
-                        Some(h.to_string()),
-                        args.iter()
-                            .find(|a| !a.starts_with('-'))
-                            .map(|a| a.to_string()),
-                    ),
-                    None => (None, None),
-                };
+                // 不加引号的 heredoc 会展开 $( ) / 反引号：正文里可能藏命令
+                if p.heredoc_expands {
+                    risk = risk.max(PartRisk::Unparsed);
+                }
+                let words = analyze_words(&shell_words(&p.text));
                 CommandPart {
-                    text,
-                    op,
-                    head,
-                    sub,
+                    text: p.text,
+                    op: p.op,
+                    head: words.head,
+                    sub: words.sub,
+                    wrapper: words.wrapper,
+                    writes: words.writes,
+                    append: words.append,
+                    heredoc_lines: p.heredoc_lines,
                     risk,
                 }
             })
@@ -220,24 +219,33 @@ impl PolicyEngine {
     }
 }
 
-/// 复合命令中的一段（审批弹窗逐段展示）
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 复合命令中的一段（审批弹窗据此生成总说明）
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CommandPart {
-    /// 原文（保留引号与替换），已去首尾空白
+    /// 原文（保留引号与替换，不含 heredoc 正文），已去首尾空白
     pub text: String,
     /// 与下一段之间的连接符：`|` `||` `&&` `;` `&`；末段为 None
     pub op: Option<String>,
-    /// 主命令名（剥掉环境变量赋值与路径前缀）
+    /// 主命令名（剥掉环境变量赋值、路径前缀与 sudo 等前缀）
     pub head: Option<String>,
     /// 主命令名后的第一个非选项参数（如 systemctl restart 的 restart）
     pub sub: Option<String>,
+    /// 包在主命令外的前缀命令：sudo / nohup / nice / time / timeout / stdbuf
+    pub wrapper: Option<String>,
+    /// 输出重定向写入的文件（第一个，忽略 /dev/null 与 `>&` 复制描述符）
+    pub writes: Option<String>,
+    /// `>>` 追加写
+    pub append: bool,
+    /// heredoc 正文行数（无 heredoc 为 0）
+    pub heredoc_lines: usize,
     pub risk: PartRisk,
 }
 
 /// 单段风险，按严重程度升序（取 max 即该段最高风险）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum PartRisk {
     /// 可证明只读
+    #[default]
     ReadOnly,
     /// 无法证明只读：白名单外命令、输出重定向、写系统的参数
     Write,
@@ -285,51 +293,185 @@ fn sub_risk(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> PartRisk {
     }
 }
 
-type RawParts = Vec<(String, Option<String>)>;
+#[derive(Default)]
+struct RawPart {
+    /// 展示原文
+    text: String,
+    /// 判风险用的文本：去掉 heredoc 操作符与定界符（它们不是命令）
+    scan: String,
+    op: Option<String>,
+    heredoc_lines: usize,
+    heredoc_expands: bool,
+}
 
-fn push_part(cur: &mut String, op: Option<String>, out: &mut RawParts) {
-    let text = cur.trim().to_string();
-    cur.clear();
-    if !text.is_empty() {
-        out.push((text, op));
+struct Heredoc {
+    delim: String,
+    strip_tabs: bool,
+    quoted: bool,
+    part: usize,
+}
+
+fn push_part(cur: &mut RawPart, op: Option<String>, out: &mut Vec<RawPart>) {
+    let mut part = std::mem::take(cur);
+    part.text = part.text.trim().to_string();
+    if !part.text.is_empty() {
+        part.op = op;
+        out.push(part);
     } else if let (Some(op), Some(last)) = (op, out.last_mut()) {
         // 空段（如 `a ;; b`）：连接符并给上一段
-        last.1 = Some(op);
+        last.op = Some(op);
+    }
+}
+
+/// `<<` 之后：可选 `-`、空白、定界符（可带引号/反斜杠 = 正文不展开）。
+/// 原文照录进 text，不进 scan。定界符为空 → Err。
+fn read_heredoc_op(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    cur: &mut RawPart,
+    part: usize,
+) -> Result<Heredoc, ()> {
+    cur.text.push_str("<<");
+    let strip_tabs = chars.peek() == Some(&'-');
+    if strip_tabs {
+        chars.next();
+        cur.text.push('-');
+    }
+    while let Some(&c) = chars.peek() {
+        if c != ' ' && c != '\t' {
+            break;
+        }
+        cur.text.push(c);
+        chars.next();
+    }
+    let (mut delim, mut quoted) = (String::new(), false);
+    while let Some(&c) = chars.peek() {
+        match c {
+            '\'' | '"' => {
+                chars.next();
+                cur.text.push(c);
+                quoted = true;
+                for q in chars.by_ref() {
+                    cur.text.push(q);
+                    if q == c {
+                        break;
+                    }
+                    delim.push(q);
+                }
+            }
+            '\\' => {
+                chars.next();
+                cur.text.push(c);
+                quoted = true;
+                if let Some(n) = chars.next() {
+                    cur.text.push(n);
+                    delim.push(n);
+                }
+            }
+            c if c.is_whitespace() || ";|&<>()".contains(c) => break,
+            _ => {
+                chars.next();
+                cur.text.push(c);
+                delim.push(c);
+            }
+        }
+    }
+    if delim.is_empty() {
+        return Err(());
+    }
+    Ok(Heredoc {
+        delim,
+        strip_tabs,
+        quoted,
+        part,
+    })
+}
+
+/// 换行后读掉 heredoc 正文（直到定界符行或输入结束），行数与是否会展开记到所属段
+fn read_heredoc_body(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    h: &Heredoc,
+    out: &mut [RawPart],
+) {
+    let (mut lines, mut expands) = (0usize, false);
+    loop {
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut line = String::new();
+        for c in chars.by_ref() {
+            if c == '\n' {
+                break;
+            }
+            line.push(c);
+        }
+        let cmp = if h.strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line.as_str()
+        };
+        if cmp.trim_end_matches('\r') == h.delim {
+            break;
+        }
+        lines += 1;
+        if !h.quoted && (line.contains("$(") || line.contains('`')) {
+            expands = true;
+        }
+    }
+    if let Some(p) = out.get_mut(h.part) {
+        p.heredoc_lines += lines;
+        p.heredoc_expands |= expands;
     }
 }
 
 /// 只按顶层连接符切分并保留原文：引号、`$( )`、反引号内不切；
-/// `2>&1`、`&>` 里的 `&` 属于重定向。引号/替换不闭合 → Err。
-fn split_top_level(cmd: &str) -> Result<RawParts, ()> {
-    let mut out = RawParts::new();
-    let mut cur = String::new();
+/// `2>&1`、`&>` 里的 `&` 属于重定向；heredoc 正文整体跳过。引号/替换不闭合 → Err。
+fn split_top_level(cmd: &str) -> Result<Vec<RawPart>, ()> {
+    let mut out: Vec<RawPart> = Vec::new();
+    let mut cur = RawPart::default();
     let mut chars = cmd.chars().peekable();
     let (mut in_single, mut in_double, mut in_tick) = (false, false, false);
     let mut depth = 0usize;
+    let mut heredocs: Vec<Heredoc> = Vec::new();
     while let Some(c) = chars.next() {
         let quoted = in_single || in_double || in_tick || depth > 0;
         match c {
             '\\' if !in_single => {
-                cur.push(c);
-                cur.push(chars.next().ok_or(())?);
+                let n = chars.next().ok_or(())?;
+                for x in [c, n] {
+                    cur.text.push(x);
+                    cur.scan.push(x);
+                }
                 continue;
             }
             '\'' if !in_double && !in_tick && depth == 0 => in_single = !in_single,
             '"' if !in_single && !in_tick && depth == 0 => in_double = !in_double,
             '`' if !in_single => in_tick = !in_tick,
             '$' if !in_single && chars.peek() == Some(&'(') => {
-                cur.push(c);
-                cur.push('(');
                 chars.next();
+                cur.text.push_str("$(");
+                cur.scan.push_str("$(");
                 depth += 1;
                 continue;
             }
             '(' if depth > 0 && !in_single => depth += 1,
             ')' if depth > 0 && !in_single => depth -= 1,
+            '<' if !quoted && chars.peek() == Some(&'<') => {
+                chars.next();
+                if chars.peek() == Some(&'<') {
+                    // here-string `<<<`：后面是普通单词
+                    chars.next();
+                    cur.text.push_str("<<<");
+                    cur.scan.push_str("<<<");
+                    continue;
+                }
+                heredocs.push(read_heredoc_op(&mut chars, &mut cur, out.len())?);
+                continue;
+            }
             '|' | '&' | ';' | '\n' if !quoted => {
-                let prev = cur.chars().last();
+                let prev = cur.text.chars().last();
                 if c == '&' && (prev == Some('>') || chars.peek() == Some(&'>')) {
-                    cur.push(c);
+                    cur.text.push(c);
+                    cur.scan.push(c);
                     continue;
                 }
                 let op = match (c, chars.peek()) {
@@ -345,11 +487,17 @@ fn split_top_level(cmd: &str) -> Result<RawParts, ()> {
                     _ => c.to_string(),
                 };
                 push_part(&mut cur, Some(op), &mut out);
+                if c == '\n' {
+                    for h in heredocs.drain(..) {
+                        read_heredoc_body(&mut chars, &h, &mut out);
+                    }
+                }
                 continue;
             }
             _ => {}
         }
-        cur.push(c);
+        cur.text.push(c);
+        cur.scan.push(c);
     }
     if in_single || in_double || in_tick || depth > 0 {
         return Err(());
@@ -357,11 +505,154 @@ fn split_top_level(cmd: &str) -> Result<RawParts, ()> {
     push_part(&mut cur, None, &mut out);
     // 末尾的 `;` 不再连接下一段（`&` 表示后台运行，保留）
     if let Some(last) = out.last_mut() {
-        if last.1.as_deref() == Some(";") {
-            last.1 = None;
+        if last.op.as_deref() == Some(";") {
+            last.op = None;
         }
     }
     Ok(out)
+}
+
+/// 按 shell 规则切单词并去掉引号；bool = 单词含引号/转义（不能再当操作符解读）
+fn shell_words(text: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let (mut word, mut quoted, mut started) = (String::new(), false, false);
+    let (mut in_single, mut in_double) = (false, false);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                quoted = true;
+                started = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                quoted = true;
+                started = true;
+            }
+            '\\' if !in_single => {
+                if let Some(n) = chars.next() {
+                    word.push(n);
+                }
+                quoted = true;
+                started = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if started {
+                    out.push((std::mem::take(&mut word), quoted));
+                }
+                quoted = false;
+                started = false;
+            }
+            _ => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push((word, quoted));
+    }
+    out
+}
+
+/// 包在真正命令外面的前缀命令
+const WRAPPERS: &[&str] = &["sudo", "nohup", "nice", "time", "timeout", "stdbuf"];
+/// 前缀命令里带取值的选项（取值是下一个单词）
+const WRAPPER_VALUE_OPTS: &[&str] = &["-u", "-g", "-C", "-h", "-p", "-n", "-s", "-k"];
+
+#[derive(Default)]
+struct Words {
+    head: Option<String>,
+    sub: Option<String>,
+    wrapper: Option<String>,
+    writes: Option<String>,
+    append: bool,
+}
+
+/// 单词是重定向时返回 (是否输出, 是否追加, 内联目标, 目标是否在下一个单词)
+fn redirect_of(word: &str) -> Option<(bool, bool, Option<String>, bool)> {
+    let rest = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix('&').unwrap_or(rest);
+    if let Some(r) = rest.strip_prefix("<<") {
+        // heredoc / here-string：`<< EOF` 时定界符在下一个单词
+        let r = r.trim_start_matches(['<', '-']);
+        return Some((false, false, None, r.is_empty()));
+    }
+    if let Some(r) = rest.strip_prefix('<') {
+        return Some((false, false, None, r.is_empty()));
+    }
+    let r = rest.strip_prefix('>')?;
+    let append = r.starts_with('>');
+    let r = r.trim_start_matches(['>', '|']);
+    if r.starts_with('&') {
+        // >&2：复制描述符，不写文件
+        return Some((false, false, None, false));
+    }
+    if r.is_empty() {
+        Some((true, append, None, true))
+    } else {
+        Some((true, append, Some(r.to_string()), false))
+    }
+}
+
+fn analyze_words(words: &[(String, bool)]) -> Words {
+    let mut w = Words::default();
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let (word, quoted) = (&words[i].0, words[i].1);
+        let redirect = if quoted { None } else { redirect_of(word) };
+        let Some((output, append, inline, needs_next)) = redirect else {
+            positional.push(word);
+            i += 1;
+            continue;
+        };
+        let target = inline.or_else(|| {
+            needs_next
+                .then(|| words.get(i + 1).map(|x| x.0.clone()))
+                .flatten()
+        });
+        if let (true, Some(t), None) = (output, target, &w.writes) {
+            if t != "/dev/null" {
+                w.writes = Some(t);
+                w.append = append;
+            }
+        }
+        i += if needs_next { 2 } else { 1 };
+    }
+    let mut rest = positional.into_iter().peekable();
+    // 前导环境变量赋值 A=1 B=2 cmd
+    while rest.peek().is_some_and(|t| {
+        t.split_once('=')
+            .is_some_and(|(k, _)| is_ident(k) && !t.starts_with('/'))
+    }) {
+        rest.next();
+    }
+    let base = |t: &str| t.rsplit('/').next().unwrap_or(t).to_string();
+    let mut head = rest.next().map(base);
+    if let Some(h) = head.clone().filter(|h| WRAPPERS.contains(&h.as_str())) {
+        while let Some(t) = rest.peek() {
+            if !t.starts_with('-') {
+                break;
+            }
+            let takes_value = WRAPPER_VALUE_OPTS.contains(t);
+            rest.next();
+            if takes_value {
+                rest.next();
+            }
+        }
+        if h == "timeout" {
+            rest.next(); // 时长
+        }
+        if let Some(inner) = rest.next() {
+            w.wrapper = Some(h);
+            head = Some(base(inner));
+        }
+    }
+    w.head = head.filter(|h| !h.is_empty());
+    w.sub = rest.find(|t| !t.starts_with('-')).map(str::to_string);
+    w
 }
 
 /// 提取子命令的「主命令名」：剥掉前导环境变量赋值（A=1 B=2 cmd …）与路径前缀。
@@ -752,6 +1043,68 @@ mod tests {
         );
     }
 
+    /// 截图里的真实用例：heredoc 写文件后 ls && cat。正文是数据，不能被切成命令
+    #[test]
+    fn explain_heredoc_body_is_data() {
+        let cmd = "cat > '/root/99乘法口诀.txt' <<'EOF'\n1x1=1\n1x2=2 2x2=4\n1x3=3 2x3=6 3x3=9\nEOF\nls -l '/root/99乘法口诀.txt' && cat '/root/99乘法口诀.txt'";
+        let got = PolicyEngine::new().explain(cmd);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0].text, "cat > '/root/99乘法口诀.txt' <<'EOF'");
+        assert_eq!(got[0].head.as_deref(), Some("cat"));
+        assert_eq!(got[0].writes.as_deref(), Some("/root/99乘法口诀.txt"));
+        assert!(!got[0].append);
+        assert_eq!(got[0].heredoc_lines, 3);
+        assert_eq!(got[0].risk, PartRisk::Write);
+        assert_eq!(got[0].op.as_deref(), Some(";"));
+        assert_eq!(got[1].text, "ls -l '/root/99乘法口诀.txt'");
+        assert_eq!(got[1].risk, PartRisk::ReadOnly);
+        assert_eq!(got[1].op.as_deref(), Some("&&"));
+        assert_eq!(got[2].head.as_deref(), Some("cat"));
+        assert_eq!(got[2].writes, None);
+        assert_eq!(got[2].risk, PartRisk::ReadOnly);
+    }
+
+    #[test]
+    fn explain_heredoc_variants() {
+        // `<< EOF` 带空格、`<<-` 去前导 tab；只读输出不算写
+        let got = PolicyEngine::new().explain("cat << EOF\nrm -rf /\nEOF\nuptime");
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].heredoc_lines, 1);
+        assert_eq!(got[0].writes, None);
+        assert_eq!(got[1].head.as_deref(), Some("uptime"));
+        let got = PolicyEngine::new().explain("cat <<-END > /tmp/a\n\tx\n\tEND\ndf -h");
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].writes.as_deref(), Some("/tmp/a"));
+        // 不加引号的 heredoc 会展开命令替换：按无法静态判定提示
+        let got = PolicyEngine::new().explain("cat > /tmp/b <<EOF\n$(rm -rf /)\nEOF");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].risk, PartRisk::Unparsed);
+        // 定界符缺失 → 整条无法解析
+        assert_eq!(parts("cat <<\nx")[0].2, PartRisk::Unparsed);
+    }
+
+    #[test]
+    fn explain_writes_and_wrappers() {
+        let e = PolicyEngine::new();
+        let p = &e.explain("echo hi >> /var/log/x.log 2>/dev/null")[0];
+        assert_eq!(p.writes.as_deref(), Some("/var/log/x.log"));
+        assert!(p.append);
+        let p = &e.explain("ls 2>/dev/null >/tmp/out")[0];
+        assert_eq!(p.writes.as_deref(), Some("/tmp/out"));
+        let p = &e.explain("grep x f 2>&1")[0];
+        assert_eq!(p.writes, None);
+        // 引号里的 > 不是重定向
+        let p = &e.explain("echo '>' x")[0];
+        assert_eq!(p.writes, None);
+        let p = &e.explain("sudo -u www systemctl restart nginx")[0];
+        assert_eq!(p.wrapper.as_deref(), Some("sudo"));
+        assert_eq!(p.head.as_deref(), Some("systemctl"));
+        assert_eq!(p.sub.as_deref(), Some("restart"));
+        assert_eq!(p.risk, PartRisk::Indirect);
+        let p = &e.explain("LANG=C timeout 5 /usr/bin/ping -c 1 host")[0];
+        assert_eq!(p.wrapper.as_deref(), Some("timeout"));
+        assert_eq!(p.head.as_deref(), Some("ping"));
+    }
     /// 逐段风险与整条判定一致：standard 档放行 ⇔ 每段都只读；确认 ⇔ 存在非只读段
     #[test]
     fn explain_agrees_with_classify() {

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAppStore } from '../state/app-store';
 import { Dialog } from './Dialog';
 import { useT } from '../i18n';
-import { commandHelpKey, opKey, RISK_CLASS, RISK_KEY } from './approval-help';
+import { summarizeParts } from './approval-help';
 
 /**
  * MCP 危险命令审批弹窗（安全模型第 2 条的人工确认通道）。
@@ -22,7 +22,10 @@ export function ApprovalDialog() {
     return () => window.clearInterval(timer);
   }, [pending]);
 
-  const remainingMs = pending ? pending.receivedAt + pending.expiresInMs - now : 0;
+  // now 在弹窗挂载时初始化，可能早于收到请求：不超过总时长
+  const remainingMs = pending
+    ? Math.min(pending.expiresInMs, pending.receivedAt + pending.expiresInMs - now)
+    : 0;
   useEffect(() => {
     if (pending && remainingMs <= 0) answer(pending.id, false);
   }, [pending, remainingMs, answer]);
@@ -30,7 +33,7 @@ export function ApprovalDialog() {
   if (!pending) return null;
   const deny = () => answer(pending.id, false);
   const prod = pending.production === true;
-  const parts = pending.parts ?? [];
+  const summary = pending.parts?.length ? summarizeParts(pending.parts, t) : null;
 
   return (
     <Dialog
@@ -71,29 +74,17 @@ export function ApprovalDialog() {
       <pre className="mb-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-black/50 p-2 font-mono text-xs">
         {pending.command}
       </pre>
-      {parts.length > 0 && (
-        <div className="mb-2">
-          <div className="mb-1 text-xs text-neutral-400">{t('dialogs.approvalParts')}</div>
-          <ol className="max-h-56 space-y-1 overflow-auto">
-            {parts.map((p, i) => {
-              const help = commandHelpKey(p.head, p.sub);
-              const op = opKey(p.op);
-              return (
-                <li key={i} className="rounded bg-black/30 px-2 py-1 text-xs">
-                  <div className="flex items-start gap-2">
-                    <code className="min-w-0 flex-1 break-all font-mono">{p.text}</code>
-                    <span className={`shrink-0 rounded px-1.5 text-[11px] ${RISK_CLASS[p.risk]}`}>
-                      {t(RISK_KEY[p.risk])}
-                    </span>
-                  </div>
-                  <div className={help ? 'text-neutral-300' : 'text-neutral-500'}>
-                    {help ? t(help) : t('dialogs.approvalNoHelp')}
-                  </div>
-                  {op && <div className="text-[11px] text-neutral-500">↳ {t(op)}</div>}
-                </li>
-              );
-            })}
-          </ol>
+      {summary && (
+        <div className="mb-2 rounded bg-black/30 p-2 text-xs">
+          <div className="mb-0.5 text-neutral-400">{t('dialogs.approvalSummary')}</div>
+          <div className="text-neutral-200">{summary.text || t('dialogs.approvalNothing')}</div>
+          {summary.unknown && <div className="mt-0.5 text-neutral-500">{summary.unknown}</div>}
+          {summary.reasons && (
+            <div className="mt-1 text-amber-300">
+              {t('dialogs.approvalReasons')}
+              {summary.reasons}
+            </div>
+          )}
         </div>
       )}
       <p className="mb-3 text-xs text-neutral-400">
