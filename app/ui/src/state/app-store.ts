@@ -41,6 +41,15 @@ import {
 
 export type PaneState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error';
 
+/** 复合命令的一段（后端 core-policy explain）：原文、与下一段的连接符、主命令名、风险 */
+export interface ApprovalPart {
+  text: string;
+  op: '|' | '||' | '&&' | ';' | '&' | null;
+  head: string | null;
+  sub: string | null;
+  risk: 'readonly' | 'write' | 'unparsed' | 'indirect' | 'blacklist';
+}
+
 /** MCP 危险命令审批请求（后端 mcp_ui.rs approval_request 帧 + 前端收到时刻） */
 export interface McpApprovalRequest {
   type: 'approval_request';
@@ -53,6 +62,9 @@ export interface McpApprovalRequest {
   user?: string;
   level?: string;
   production?: boolean;
+  parts?: ApprovalPart[];
+  /** agent 自述的命令用途（未经验证，仅展示） */
+  purpose?: string | null;
   /** 前端收到时刻（Date.now），用于倒计时与到期自动关闭 */
   receivedAt: number;
 }
@@ -182,7 +194,8 @@ interface AppStore {
   /** 订阅 MCP 前端交互事件（App 挂载时调用一次） */
   subscribeMcpUi(): void;
   /** 应答审批并出队；到期未答的由弹窗以 allow=false 出队 */
-  answerApproval(id: string, allow: boolean): void;
+  /** always：批准且本会话此命令以后免确认（后端内存规则，应用重启失效） */
+  answerApproval(id: string, allow: boolean, always?: boolean): void;
   /** AI 控制中的终端（键 = 后端 tabId） */
   aiTabs: Record<string, AiTabKind>;
   /** 把终端共享给 AI / 收回 AI 控制（参数为后端 tabId） */
@@ -611,8 +624,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       void invoke('mcp_ui_subscribe', { events });
     },
 
-    answerApproval: (id, allow) => {
-      void invoke('mcp_approve', { id, allow }).catch(() => undefined);
+    answerApproval: (id, allow, always = false) => {
+      void invoke('mcp_approve', { id, allow, always }).catch(() => undefined);
       set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) }));
     },
 

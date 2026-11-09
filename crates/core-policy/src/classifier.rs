@@ -150,33 +150,16 @@ impl PolicyEngine {
 
         let mut has_unproven = false;
         for sub in &subs {
-            let Some(head) = command_head(sub) else {
-                return Verdict::RequireConfirmation;
-            };
-            if blacklist.contains(&head) {
-                return Verdict::RequireConfirmation;
-            }
-            if INDIRECT_SHELLS.contains(&head) {
-                return Verdict::RequireConfirmation;
-            }
-            if !whitelist.contains(&head) {
-                has_unproven = true;
-            }
-            // 重定向到文件 = 写操作（> / >>）；输入重定向不单独判写
-            if has_output_redirect(sub) {
-                has_unproven = true;
-            }
-            // 白名单只认命令名不够：find -delete、systemctl stop、env rm 等
-            // 靠参数写系统或执行任意命令，按参数再判一次
-            let args = command_args(sub);
-            match arg_rule(head, &args) {
-                ArgRule::ReadOnly => {}
-                ArgRule::Unproven => has_unproven = true,
-                ArgRule::Indirect => return Verdict::RequireConfirmation,
+            match sub_risk(sub, &whitelist, &blacklist) {
+                PartRisk::Unparsed | PartRisk::Blacklist | PartRisk::Indirect => {
+                    return Verdict::RequireConfirmation
+                }
+                PartRisk::Write => has_unproven = true,
+                PartRisk::ReadOnly => {}
             }
         }
 
-        if production && (has_unproven || !all_whitelisted(&subs, &whitelist)) {
+        if production && has_unproven {
             // production：写操作（即任何无法证明只读的操作）强制人工确认，不可绕过
             return Verdict::RequireConfirmation;
         }
@@ -191,11 +174,194 @@ impl PolicyEngine {
         }
         Verdict::Allow
     }
+
+    /// 审批展示用：按顶层 `| || && ; &` 与换行把复合命令切成原文片段，逐段给出
+    /// 主命令名与风险（与 `classify` 同一判定）。结构无法解析时整条作为一段 Unparsed。
+    pub fn explain(&self, cmd: &str) -> Vec<CommandPart> {
+        let whitelist = self.whitelist();
+        let blacklist = self.blacklist();
+        let Ok(raw) = split_top_level(cmd) else {
+            return vec![CommandPart {
+                text: cmd.trim().to_string(),
+                op: None,
+                head: None,
+                sub: None,
+                risk: PartRisk::Unparsed,
+            }];
+        };
+        raw.into_iter()
+            .map(|(text, op)| {
+                let risk = match split_subcommands(&text) {
+                    Ok(subs) => subs
+                        .iter()
+                        .map(|s| sub_risk(s, &whitelist, &blacklist))
+                        .max()
+                        .unwrap_or(PartRisk::ReadOnly),
+                    Err(()) => PartRisk::Unparsed,
+                };
+                let (head, sub) = match split_command(&text) {
+                    Some((h, args)) => (
+                        Some(h.to_string()),
+                        args.iter()
+                            .find(|a| !a.starts_with('-'))
+                            .map(|a| a.to_string()),
+                    ),
+                    None => (None, None),
+                };
+                CommandPart {
+                    text,
+                    op,
+                    head,
+                    sub,
+                    risk,
+                }
+            })
+            .collect()
+    }
 }
 
-fn all_whitelisted(subs: &[String], whitelist: &[&str]) -> bool {
-    subs.iter()
-        .all(|s| command_head(s).is_some_and(|h| whitelist.contains(&h)))
+/// 复合命令中的一段（审批弹窗逐段展示）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandPart {
+    /// 原文（保留引号与替换），已去首尾空白
+    pub text: String,
+    /// 与下一段之间的连接符：`|` `||` `&&` `;` `&`；末段为 None
+    pub op: Option<String>,
+    /// 主命令名（剥掉环境变量赋值与路径前缀）
+    pub head: Option<String>,
+    /// 主命令名后的第一个非选项参数（如 systemctl restart 的 restart）
+    pub sub: Option<String>,
+    pub risk: PartRisk,
+}
+
+/// 单段风险，按严重程度升序（取 max 即该段最高风险）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PartRisk {
+    /// 可证明只读
+    ReadOnly,
+    /// 无法证明只读：白名单外命令、输出重定向、写系统的参数
+    Write,
+    /// 结构无法静态判定（子 shell、不配对的引号等）
+    Unparsed,
+    /// 间接执行：bash -c / sudo / xargs / find -exec 等
+    Indirect,
+    /// 命中黑名单
+    Blacklist,
+}
+
+impl PartRisk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PartRisk::ReadOnly => "readonly",
+            PartRisk::Write => "write",
+            PartRisk::Unparsed => "unparsed",
+            PartRisk::Indirect => "indirect",
+            PartRisk::Blacklist => "blacklist",
+        }
+    }
+}
+
+fn sub_risk(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> PartRisk {
+    let Some(head) = command_head(sub) else {
+        return PartRisk::Unparsed;
+    };
+    if blacklist.contains(&head) {
+        return PartRisk::Blacklist;
+    }
+    if INDIRECT_SHELLS.contains(&head) {
+        return PartRisk::Indirect;
+    }
+    // 白名单只认命令名不够：find -delete、systemctl stop、env rm 等
+    // 靠参数写系统或执行任意命令，按参数再判一次
+    let rule = arg_rule(head, &command_args(sub));
+    if rule == ArgRule::Indirect {
+        return PartRisk::Indirect;
+    }
+    // 重定向到文件 = 写操作（> / >>）；输入重定向不单独判写
+    if !whitelist.contains(&head) || has_output_redirect(sub) || rule == ArgRule::Unproven {
+        PartRisk::Write
+    } else {
+        PartRisk::ReadOnly
+    }
+}
+
+type RawParts = Vec<(String, Option<String>)>;
+
+fn push_part(cur: &mut String, op: Option<String>, out: &mut RawParts) {
+    let text = cur.trim().to_string();
+    cur.clear();
+    if !text.is_empty() {
+        out.push((text, op));
+    } else if let (Some(op), Some(last)) = (op, out.last_mut()) {
+        // 空段（如 `a ;; b`）：连接符并给上一段
+        last.1 = Some(op);
+    }
+}
+
+/// 只按顶层连接符切分并保留原文：引号、`$( )`、反引号内不切；
+/// `2>&1`、`&>` 里的 `&` 属于重定向。引号/替换不闭合 → Err。
+fn split_top_level(cmd: &str) -> Result<RawParts, ()> {
+    let mut out = RawParts::new();
+    let mut cur = String::new();
+    let mut chars = cmd.chars().peekable();
+    let (mut in_single, mut in_double, mut in_tick) = (false, false, false);
+    let mut depth = 0usize;
+    while let Some(c) = chars.next() {
+        let quoted = in_single || in_double || in_tick || depth > 0;
+        match c {
+            '\\' if !in_single => {
+                cur.push(c);
+                cur.push(chars.next().ok_or(())?);
+                continue;
+            }
+            '\'' if !in_double && !in_tick && depth == 0 => in_single = !in_single,
+            '"' if !in_single && !in_tick && depth == 0 => in_double = !in_double,
+            '`' if !in_single => in_tick = !in_tick,
+            '$' if !in_single && chars.peek() == Some(&'(') => {
+                cur.push(c);
+                cur.push('(');
+                chars.next();
+                depth += 1;
+                continue;
+            }
+            '(' if depth > 0 && !in_single => depth += 1,
+            ')' if depth > 0 && !in_single => depth -= 1,
+            '|' | '&' | ';' | '\n' if !quoted => {
+                let prev = cur.chars().last();
+                if c == '&' && (prev == Some('>') || chars.peek() == Some(&'>')) {
+                    cur.push(c);
+                    continue;
+                }
+                let op = match (c, chars.peek()) {
+                    ('|', Some('|')) | ('&', Some('&')) => {
+                        chars.next();
+                        format!("{c}{c}")
+                    }
+                    ('|', Some('&')) => {
+                        chars.next();
+                        "|".to_string()
+                    }
+                    ('\n', _) => ";".to_string(),
+                    _ => c.to_string(),
+                };
+                push_part(&mut cur, Some(op), &mut out);
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    if in_single || in_double || in_tick || depth > 0 {
+        return Err(());
+    }
+    push_part(&mut cur, None, &mut out);
+    // 末尾的 `;` 不再连接下一段（`&` 表示后台运行，保留）
+    if let Some(last) = out.last_mut() {
+        if last.1.as_deref() == Some(";") {
+            last.1 = None;
+        }
+    }
+    Ok(out)
 }
 
 /// 提取子命令的「主命令名」：剥掉前导环境变量赋值（A=1 B=2 cmd …）与路径前缀。
@@ -518,5 +684,100 @@ mod tests {
     fn env_prefix_is_stripped() {
         assert_eq!(command_head("A=1 B=2 rm -rf /"), Some("rm"));
         assert_eq!(command_head("/bin/rm -rf /"), Some("rm"));
+    }
+
+    fn parts(cmd: &str) -> Vec<(String, Option<String>, PartRisk)> {
+        PolicyEngine::new()
+            .explain(cmd)
+            .into_iter()
+            .map(|p| (p.text, p.op, p.risk))
+            .collect()
+    }
+
+    #[test]
+    fn explain_splits_compound_command_keeping_raw_text() {
+        let got = PolicyEngine::new()
+            .explain("cd /app && git pull | tee 'a b.log'; systemctl restart nginx 2>&1 &");
+        let texts: Vec<_> = got.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "cd /app",
+                "git pull",
+                "tee 'a b.log'",
+                "systemctl restart nginx 2>&1"
+            ]
+        );
+        let ops: Vec<_> = got.iter().map(|p| p.op.as_deref()).collect();
+        assert_eq!(ops, [Some("&&"), Some("|"), Some(";"), Some("&")]);
+        assert_eq!(got[3].head.as_deref(), Some("systemctl"));
+        assert_eq!(got[3].sub.as_deref(), Some("restart"));
+        assert!(got.iter().all(|p| p.risk == PartRisk::Write));
+    }
+
+    #[test]
+    fn explain_risk_per_part() {
+        assert_eq!(
+            parts("ls -la | grep foo || df -h"),
+            [
+                ("ls -la".into(), Some("|".into()), PartRisk::ReadOnly),
+                ("grep foo".into(), Some("||".into()), PartRisk::ReadOnly),
+                ("df -h".into(), None, PartRisk::ReadOnly),
+            ]
+        );
+        // 命令替换不切开，但内层黑名单命令计入该段风险
+        assert_eq!(
+            parts("echo \"$(rm -rf /)\"; uptime"),
+            [
+                (
+                    "echo \"$(rm -rf /)\"".into(),
+                    Some(";".into()),
+                    PartRisk::Blacklist
+                ),
+                ("uptime".into(), None, PartRisk::ReadOnly),
+            ]
+        );
+        assert_eq!(parts("sudo ls")[0].2, PartRisk::Indirect);
+        assert_eq!(
+            parts("find / -name x -exec cat {} \\;")[0].2,
+            PartRisk::Indirect
+        );
+        assert_eq!(parts("cat a > b")[0].2, PartRisk::Write);
+        // 引号中的连接符不切
+        assert_eq!(parts("grep 'a|b;c' f").len(), 1);
+        // 结构无法解析：整条一段
+        assert_eq!(
+            parts("echo 'oops && rm x"),
+            [("echo 'oops && rm x".into(), None, PartRisk::Unparsed)]
+        );
+    }
+
+    /// 逐段风险与整条判定一致：standard 档放行 ⇔ 每段都只读；确认 ⇔ 存在非只读段
+    #[test]
+    fn explain_agrees_with_classify() {
+        let engine = PolicyEngine::new();
+        for cmd in [
+            "ls | wc -l",
+            "uptime && df -h; free -m",
+            "systemctl status nginx | head",
+            "systemctl restart nginx && systemctl status nginx",
+            "rm -rf /tmp/x; ls",
+            "echo $(whoami) > /tmp/me",
+            "bash -c 'ls'",
+            "journalctl -u x --vacuum-time=1d",
+            "ip addr show && ip link set eth0 down",
+        ] {
+            let all_ro = engine
+                .explain(cmd)
+                .iter()
+                .all(|p| p.risk == PartRisk::ReadOnly);
+            let verdict = engine.classify(cmd, AccessLevel::Standard, false);
+            assert_eq!(
+                verdict == Verdict::Allow,
+                all_ro,
+                "{cmd}: {verdict:?} vs {:?}",
+                engine.explain(cmd)
+            );
+        }
     }
 }
