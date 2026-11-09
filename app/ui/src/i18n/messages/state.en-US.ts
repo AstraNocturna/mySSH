@@ -136,4 +136,6 @@ export const enState: Record<keyof typeof zhState, string> = {
   'state.aiTabOpened': 'AI opened a terminal: {name}',
   'state.aiTabNoSession': 'Session not found or is a local session',
   'state.aiTabClosedByUser': 'The user closed the tab',
+  'state.aiTabClosedByAi': 'AI closed the terminal: {name}',
+  'state.aiReleased': 'AI released control of "{name}"; the tab stays open',
 };

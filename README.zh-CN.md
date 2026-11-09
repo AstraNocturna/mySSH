@@ -49,7 +49,7 @@
 | `file_backups` / `file_rollback` | AI 改动自动备份与回滚：`file_edit` / `sftp_write` / `sftp_delete` 改前自动备份原内容；文件在改动后又被他人修改时默认拒绝回滚。侧边栏会话右键「AI 文件改动…」可一键回滚 |
 | `recipe_list` / `recipe_run` | 内置运维 recipe：系统概况、磁盘占用、进程排行、端口、服务状态/日志、Docker 容器、服务重启、发信号等 16 个参数化模板，各带风险等级（read / change / danger）。参数按白名单校验后代入，read 级在只读档也能用（如 `docker ps`），danger 级始终需你确认 |
 | `job_start` / `job_read` / `job_stop` / `job_list` | 后台命令：长时间运行的命令（构建、`tail -f`、长下载）后台启动立即返回，按字节游标分段读取输出（默认剥离 ANSI 控制序列、折叠进度条），可随时停止；命令门与 `ssh_exec` 相同，属 `ssh_exec` 权限组 |
-| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` / `terminal_list` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互。`terminal_read` 可在服务端等待提示符正则（`wait_for`）或输出静默（`idle_ms`），判定命令执行完毕而无需反复轮询。窗口在线时以普通标签打开，可旁观、你键入时 AI 暂停写入、右键随时收回控制；也可右键把已有标签「共享给 AI」（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略）。AI 控制的终端全程自动录像（含 AI 输入的命令），录像结束时其 SHA-256 写入哈希链审计日志，可在命令面板 →「会话录像」校验录像与审计日志事后未被改动 |
+| `terminal_open` / `terminal_send` / `terminal_read` / `terminal_close` / `terminal_list` | 交互式终端：在会话上开有状态 shell、发送输入、读取输出、关闭——用于 REPL、分页器等 `ssh_exec` 驱动不了的交互。`terminal_read` 可在服务端等待提示符正则（`wait_for`）或输出静默（`idle_ms`），判定命令执行完毕而无需反复轮询。窗口在线时以普通标签打开，可旁观、你键入时 AI 暂停写入、右键随时收回控制；AI 关闭自己打开的终端时标签一并关闭（你共享的标签保留并提示）；也可右键把已有标签「共享给 AI」（独立的 `terminal` 权限组，**默认关闭**：按键字节流无法经过命令策略）。AI 控制的终端全程自动录像（含 AI 输入的命令），录像结束时其 SHA-256 写入哈希链审计日志，可在命令面板 →「会话录像」校验录像与审计日志事后未被改动 |
 
 **权限模型**（按 会话 → 最近的分组 → 全局 解析）：
 

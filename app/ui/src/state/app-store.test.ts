@@ -679,6 +679,39 @@ describe('MCP agent 终端标签', () => {
     expect(state().aiTabs).toEqual({ bt2: 'shared' });
   });
 
+  it('AI terminal_close：AI 开的标签直接关闭（不弹确认），共享标签保留并提示', () => {
+    useAppStore.setState({ sessions: [rec] });
+    state().connectOrActivate('s1', 'web-01');
+    state().connect(spec);
+    const [aiTab, userTab] = state().tabs;
+    aiTab.panes[aiTab.activePaneId].session.tabId = 'bt-ai';
+    userTab.panes[userTab.activePaneId].session.tabId = 'bt-user';
+    state().setPaneState(aiTab.id, aiTab.activePaneId, 'connected');
+    push({ type: 'agent_terminal_attached', tabId: 'bt-ai', terminalId: 'x', kind: 'agent' });
+    push({ type: 'agent_terminal_attached', tabId: 'bt-user', terminalId: 'y', kind: 'shared' });
+
+    push({ type: 'agent_terminal_closed', tabId: 'bt-user', closeTab: false });
+    expect(state().tabs.map((t) => t.id)).toEqual([aiTab.id, userTab.id]);
+    expect(state().aiTabs).toEqual({ 'bt-ai': 'agent' });
+    expect(state().notices.some((n) => n.message.includes('标签保留'))).toBe(true);
+
+    push({ type: 'agent_terminal_closed', tabId: 'bt-ai', closeTab: true });
+    expect(state().pendingCloseTabs).toBeNull();
+    expect(state().tabs.map((t) => t.id)).toEqual([userTab.id]);
+    expect(state().aiTabs).toEqual({});
+    expect(state().notices.some((n) => n.message.includes('AI 已关闭终端'))).toBe(true);
+  });
+
+  it('MCP 服务停止清场（无 closeTab）：只摘标记，不关标签', () => {
+    state().connect(spec);
+    const t = state().tabs[0];
+    t.panes[t.activePaneId].session.tabId = 'bt-x';
+    push({ type: 'agent_terminal_attached', tabId: 'bt-x', terminalId: 'z', kind: 'agent' });
+    push({ type: 'agent_terminal_closed', tabId: 'bt-x' });
+    expect(state().tabs).toHaveLength(1);
+    expect(state().aiTabs).toEqual({});
+  });
+
   it('共享失败（权限未放行）只提示错误，不打标记', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) =>
       cmd === 'mcp_share_tab' ? Promise.reject(new Error('denied')) : Promise.resolve(undefined),

@@ -129,7 +129,9 @@ type McpUiFrame =
   | Omit<McpApprovalRequest, 'receivedAt'>
   | { type: 'agent_terminal_open'; requestId: string; sessionId: string; sessionName?: string }
   | { type: 'agent_terminal_attached'; tabId: string; terminalId: string; kind: AiTabKind }
-  | { type: 'agent_terminal_closed'; tabId: string }
+  /** closeTab：terminal_close 时 AI 自己开的标签为 true（前端一并关闭）、共享标签为 false；
+   *  MCP 服务停止清场时缺省（只摘标记） */
+  | { type: 'agent_terminal_closed'; tabId: string; closeTab?: boolean }
   | ExecMirrorFrame;
 
 function withoutAiTab(m: Record<string, AiTabKind>, tabId: string): Record<string, AiTabKind> {
@@ -620,6 +622,21 @@ export const useAppStore = create<AppStore>((set, get) => {
           set((s) => ({ aiTabs: { ...s.aiTabs, [frame.tabId]: frame.kind } }));
         } else if (frame.type === 'agent_terminal_closed') {
           set((s) => ({ aiTabs: withoutAiTab(s.aiTabs, frame.tabId) }));
+          if (frame.closeTab === undefined) return;
+          const tab = get().tabs.find((t) =>
+            Object.values(t.panes).some((p) => p.session.tabId === frame.tabId),
+          );
+          if (!tab) return;
+          if (!frame.closeTab) {
+            get().notify(tNow('state.aiReleased', { name: tab.title }), 'info');
+            return;
+          }
+          const pane = Object.values(tab.panes).find((p) => p.session.tabId === frame.tabId);
+          const terminals = Object.values(tab.panes).filter((p) => !p.mirror);
+          // AI 自己开的标签：AI 已关闭，不再弹活跃连接确认；分屏里还有别的终端时只关这一格
+          if (pane && terminals.length > 1) get().closePane(tab.id, pane.id);
+          else doCloseTab(tab.id);
+          get().notify(tNow('state.aiTabClosedByAi', { name: tab.title }), 'info');
         } else if (
           frame.type === 'exec_start' ||
           frame.type === 'exec_output' ||
