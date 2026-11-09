@@ -131,4 +131,6 @@ export const zhState = {
   'state.aiTabOpened': 'AI 打开了终端：{name}',
   'state.aiTabNoSession': '会话不存在或为本地会话',
   'state.aiTabClosedByUser': '用户关闭了标签',
+  'state.aiTabClosedByAi': 'AI 已关闭终端：{name}',
+  'state.aiReleased': 'AI 已结束对「{name}」的控制，标签保留',
 } as const;

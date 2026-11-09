@@ -610,7 +610,8 @@ async fn terminal_read(terms: &Arc<McpTerminalState>, args: &Value) -> Result<St
         tokio::time::sleep(READ_POLL).await;
     }
 }
-/// terminal_close：移出注册表 → 释放（落审计）。UI 承载的标签只收回控制，不关标签
+/// terminal_close：移出注册表 → 释放（落审计）。AI 自己打开的标签请前端一并关闭；
+/// 用户共享的标签只收回控制、标签留给用户
 async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, String> {
     let id = req_term_id(args, "terminal_close")?;
     let sess = ctx
@@ -620,9 +621,27 @@ async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, Strin
         .remove(id)
         .ok_or_else(|| format!("终端 {id} 不存在或已关闭"))?;
     sess.shutdown().await;
-    if let Some(tab) = sess.ui_tab() {
-        ctx.ui
-            .emit(&json!({ "type": "agent_terminal_closed", "tabId": tab }));
+    let mut out = json!({ "closed": true });
+    if let TermIo::Ui { tab_id, kind, .. } = &sess.io {
+        let close_tab = *kind == UiKind::Agent;
+        let sent = ctx.ui.emit(&json!({
+            "type": "agent_terminal_closed",
+            "tabId": tab_id,
+            "closeTab": close_tab,
+        }));
+        let (tab, note) = match (close_tab, sent) {
+            (true, true) => (
+                "closed",
+                "AI 打开的 mySSH 标签已一并关闭，该标签的 SSH 连接随之断开",
+            ),
+            (true, false) => ("kept", "mySSH 窗口不在线，标签未能关闭，需用户手动关闭"),
+            (false, _) => (
+                "kept",
+                "该标签是用户共享给 AI 的：只收回 AI 控制，标签与连接保留给用户",
+            ),
+        };
+        out["tab"] = json!(tab);
+        out["note"] = json!(note);
     }
     if let Some(sid) = &sess.session_id {
         audit(
@@ -634,7 +653,7 @@ async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, Strin
         .await;
     }
     tracing::info!(terminal_id = %id, "MCP 终端已关闭");
-    Ok(json!({ "closed": true }).to_string())
+    Ok(out.to_string())
 }
 
 impl McpTerminalState {
@@ -799,6 +818,77 @@ mod tests {
             !tap.user_active(t0 + Duration::from_secs(2)),
             "超过优先窗后 AI 恢复写入"
         );
+    }
+
+    /// terminal_close：AI 自己开的标签请前端关闭（tab=closed）；用户共享的只收回控制（tab=kept）；
+    /// 窗口不在线时如实报告未能关闭
+    #[tokio::test]
+    async fn close_agent_tab_closes_ui_tab_shared_tab_kept() {
+        let dir = std::env::temp_dir().join(format!("myssh-term-close-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir.join("t.db")).await.unwrap());
+        let terms = McpTerminalState::new();
+        let ui = crate::mcp_ui::McpUiHub::new();
+        let frames = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let fs = frames.clone();
+        ui.set_sink(Arc::new(move |v: &Value| {
+            fs.lock().push(v.clone());
+            true
+        }));
+        let mgr = Arc::new(crate::terminal::TerminalManager::default());
+        let recs = crate::recording::RecordingStore::new(dir.join("rec"), None);
+        let ctx = TermCtx {
+            store: &store,
+            terms: &terms,
+            ui: &ui,
+            mgr: &mgr,
+            recs: &recs,
+        };
+        let close = |id: String| {
+            let ctx = &ctx;
+            async move {
+                let out = terminal_close(ctx, &json!({ "terminalId": id }))
+                    .await
+                    .unwrap();
+                serde_json::from_str::<Value>(&out).unwrap()
+            }
+        };
+
+        let tap_a = Arc::new(crate::terminal::AgentTap::new());
+        let a = terms.insert_ui("tabA", tap_a.clone(), None, UiKind::Agent, None);
+        let v = close(a.clone()).await;
+        assert_eq!(v["tab"], "closed", "{v}");
+        assert!(tap_a.is_closed());
+        assert!(terms.get(&a).is_err());
+        let f = frames.lock().last().cloned().unwrap();
+        assert_eq!(f["type"], "agent_terminal_closed");
+        assert_eq!(f["tabId"], "tabA");
+        assert_eq!(f["closeTab"], true);
+
+        let s = terms.insert_ui(
+            "tabS",
+            Arc::new(crate::terminal::AgentTap::new()),
+            None,
+            UiKind::Shared,
+            None,
+        );
+        let v = close(s).await;
+        assert_eq!(v["tab"], "kept", "{v}");
+        assert_eq!(frames.lock().last().unwrap()["closeTab"], false);
+
+        // 窗口不在线：AI 标签关不掉，返回 kept 并说明
+        ui.set_sink(Arc::new(|_: &Value| false));
+        let b = terms.insert_ui(
+            "tabB",
+            Arc::new(crate::terminal::AgentTap::new()),
+            None,
+            UiKind::Agent,
+            None,
+        );
+        let v = close(b).await;
+        assert_eq!(v["tab"], "kept", "{v}");
+        assert!(v["note"].as_str().unwrap().contains("不在线"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -905,7 +905,7 @@ fn tools_list(perms: &McpPerms) -> Value {
             },
             {
                 "name": "terminal_close",
-                "description": "关闭终端：后台终端断通道并释放连接；mySSH 标签只收回 AI 控制、标签保留给用户（落审计）",
+                "description": "关闭终端（落审计）：后台终端断通道并释放连接；AI 经 terminal_open 打开的 mySSH 标签一并关闭（连接断开，返回 tab=closed）；用户共享给 AI 的标签只收回控制、标签保留给用户（tab=kept）",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
