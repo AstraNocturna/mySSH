@@ -163,7 +163,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// 取出 buf 中全部完整的 UTF-8 内容（非法序列替换为 U+FFFD），末尾不完整的多字节序列
 /// 留在 buf 等下一块；flush=true 时连残留一并替换输出
-fn take_utf8(buf: &mut Vec<u8>, flush: bool) -> String {
+pub(crate) fn take_utf8(buf: &mut Vec<u8>, flush: bool) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < buf.len() {

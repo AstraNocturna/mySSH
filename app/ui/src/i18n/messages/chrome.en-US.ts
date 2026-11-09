@@ -58,6 +58,10 @@ export const enChrome: Record<keyof typeof zhChrome, string> = {
   'chrome.menuCloseRight': 'Close to the Right',
   'chrome.menuCloseAll': 'Close All',
   'chrome.bellTitle': 'Terminal Bell',
+  'chrome.mirrorBanner':
+    'AI command mirror (read-only): commands the AI runs on this session, with output and exit codes, appear here live. Turn off in Settings → MCP.',
+  'chrome.mirrorTitle': 'AI command mirror (read-only)',
+  'chrome.mirrorOpenSession': 'Open a terminal for this session',
   'chrome.aiAgentTitle':
     'Opened by AI: watch it work; AI writes pause while you type; right-click to take back control',
   'chrome.aiSharedTitle': 'Shared with AI: right-click the terminal to take back control',

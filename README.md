@@ -39,8 +39,8 @@ Built-in MCP server (Streamable HTTP, loopback-only + Bearer token); one-click a
 
 | Tool | Description |
 | --- | --- |
-| `list_sessions` | List saved session profiles (never includes credentials) |
-| `ssh_exec` | Run a shell command on a session, returns stdout/stderr/exit code. Commands pass the built-in policy classifier at the session's access level; risky commands trigger an in-app approval popup (the call may return `pending_approval` — retry with the same arguments to keep waiting). Per-session rate-limited, all attempts audited. Output is token-friendly: ANSI sequences stripped, long output keeps head and tail |
+| `list_sessions` | List saved session profiles (never includes credentials), with each session's effective AI access (level, production flag, which tool groups are allowed), open tab count, and the terminals the AI can use right away (including tabs you shared with the AI) |
+| `ssh_exec` | Run a shell command on a session, returns stdout/stderr/exit code. Commands pass the built-in policy classifier at the session's access level; risky commands trigger an in-app approval popup (the call may return `pending_approval` — retry with the same arguments to keep waiting). Per-session rate-limited, all attempts audited. Output is token-friendly: ANSI sequences stripped, long output keeps head and tail. While the window is open, the command, its live output and exit code also appear in a read-only "AI · host" tab (turn off via Settings → MCP → "AI command mirror") |
 | `sftp_home` / `sftp_list` / `sftp_stat` / `sftp_read` | Remote browsing and file reads |
 | `sftp_write` / `sftp_mkdir` / `sftp_delete` / `sftp_rename` / `sftp_chmod` | Remote writes and meta ops (audited) |
 | `sftp_upload` / `sftp_download` | File transfer via the background transfer queue (shared with the UI transfer panel, **no size limit**; `wait_seconds` waits synchronously for completion) |

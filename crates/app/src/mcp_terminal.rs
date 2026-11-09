@@ -637,6 +637,27 @@ async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, Strin
     Ok(json!({ "closed": true }).to_string())
 }
 
+impl McpTerminalState {
+    /// 会话档案 id → 未关闭的 AI 终端（terminalId + kind），供 list_sessions 展示
+    pub(crate) fn live_by_session(&self) -> HashMap<String, Vec<Value>> {
+        let mut out: HashMap<String, Vec<Value>> = HashMap::new();
+        for (id, t) in self.terms.lock().iter() {
+            let Some(sid) = &t.session_id else { continue };
+            if t.shared.lock().closed {
+                continue;
+            }
+            let kind = match &t.io {
+                TermIo::Headless { .. } => "headless",
+                TermIo::Ui { kind, .. } => kind.as_str(),
+            };
+            out.entry(sid.clone())
+                .or_default()
+                .push(json!({ "terminalId": id, "kind": kind }));
+        }
+        out
+    }
+}
+
 /// terminal_list：当前可用终端（含用户共享给 AI 的标签）
 fn terminal_list(terms: &Arc<McpTerminalState>) -> String {
     let map = terms.terms.lock();

@@ -15,6 +15,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { BROADCAST_INPUT_EVENT, initBroadcastReceiver } from '../term/broadcast';
 import { takeAgentRequest, useAppStore } from './app-store';
+import { feedOf } from '../term/exec-mirror';
 import type { SessionRecord, TermOpenSpec } from '../term/types';
 
 const spec: TermOpenSpec = {
@@ -561,6 +562,68 @@ describe('MCP agent 终端标签', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0][1]).toMatchObject({ requestId: 'r4', tabId: null });
     expect((calls[0][1] as { error: unknown }).error).toBeTruthy();
+  });
+
+  it('AI 命令镜像：每会话一个只读标签，输出按序汇入，不影响连接与重开', () => {
+    useAppStore.setState({ sessions: [rec] });
+    const start = (execId: string, command: string) =>
+      push({
+        type: 'exec_start',
+        execId,
+        sessionId: 's1',
+        sessionName: 'web-01',
+        tool: 'ssh_exec',
+        command,
+      });
+    start('e1', 'uptime');
+    push({
+      type: 'exec_output',
+      execId: 'e1',
+      sessionId: 's1',
+      stream: 'stdout',
+      data: 'up 3 days\n',
+    });
+    push({
+      type: 'exec_end',
+      execId: 'e1',
+      sessionId: 's1',
+      status: 'ok',
+      exitCode: 0,
+      durationMs: 5,
+      error: null,
+      omittedBytes: 0,
+    });
+    start('e2', 'df -h');
+    const tabs = state().tabs;
+    expect(tabs).toHaveLength(1);
+    const m = tabs[0];
+    expect(m.mirrorOf).toBe('s1');
+    expect(m.title).toBe('AI · web-01');
+    expect(state().activeId).toBe(m.id);
+    expect(m.panes[m.activePaneId].state).toBe('closed');
+
+    const got: string[] = [];
+    feedOf(m.id).attach((s) => got.push(s));
+    // eslint-disable-next-line no-control-regex
+    const text = got.join('').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+    expect(text).toMatch(/\$ uptime\r\nup 3 days\r\n✓ exit 0 · 5 ms\r\n\r\n.*\$ df -h/s);
+
+    // 镜像不可分屏；连接该会话另开真实终端，不被镜像标签「激活」顶替
+    state().splitActive('row');
+    expect(Object.keys(state().tabs[0].panes)).toHaveLength(1);
+    state().connectOrActivate('s1', 'web-01');
+    expect(state().tabs).toHaveLength(2);
+    expect(state().tabs[1].mirrorOf).toBeUndefined();
+
+    // 关闭镜像无需确认、不进已关闭栈；之后的输出丢弃，下一条命令重新开标签
+    state().closeTab(m.id);
+    expect(state().pendingCloseTabs).toBeNull();
+    expect(state().tabs.some((t) => t.mirrorOf)).toBe(false);
+    expect(state().closedTabs).toHaveLength(0);
+    push({ type: 'exec_output', execId: 'e2', sessionId: 's1', stream: 'stdout', data: 'x' });
+    expect(state().tabs.some((t) => t.mirrorOf)).toBe(false);
+    start('e3', 'id');
+    expect(state().tabs.filter((t) => t.mirrorOf)).toHaveLength(1);
   });
 
   it('attached/closed 帧维护 AI 控制标记', () => {

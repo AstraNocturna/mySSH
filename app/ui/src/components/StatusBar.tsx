@@ -60,18 +60,22 @@ export function StatusBar() {
           <>
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                activePane.state === 'connected'
-                  ? 'bg-green-500'
-                  : activePane.state === 'connecting' || activePane.state === 'reconnecting'
-                    ? 'bg-yellow-500'
-                    : 'bg-neutral-600'
+                activeTab.mirrorOf
+                  ? 'bg-purple-500'
+                  : activePane.state === 'connected'
+                    ? 'bg-green-500'
+                    : activePane.state === 'connecting' || activePane.state === 'reconnecting'
+                      ? 'bg-yellow-500'
+                      : 'bg-neutral-600'
               }`}
             />
             <span className="min-w-0 truncate">{activeTab.title}</span>
             <span className="text-neutral-600">
-              {PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY]
-                ? t(PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY])
-                : activePane.state}
+              {activeTab.mirrorOf
+                ? t('chrome.mirrorTitle')
+                : PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY]
+                  ? t(PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY])
+                  : activePane.state}
             </span>
           </>
         )}

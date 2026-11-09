@@ -127,13 +127,18 @@ fn tool_group_key(name: &str) -> Option<&'static str> {
 impl McpPerms {
     /// 工具名 → 全局是否放行；未知名不拦截（交给原有「未知工具」分支）
     fn allows(&self, name: &str) -> bool {
-        match tool_group_key(name) {
-            Some("list_sessions") => self.list_sessions,
-            Some("ssh_exec") => self.ssh_exec,
-            Some("sftp_read") => self.sftp_read,
-            Some("sftp_write") => self.sftp_write,
-            Some("sftp_transfer") => self.sftp_transfer,
-            Some("terminal") => self.terminal,
+        tool_group_key(name).is_none_or(|g| self.allows_group(g))
+    }
+
+    /// 按权限分组键判定（未知键放行）
+    fn allows_group(&self, group: &str) -> bool {
+        match group {
+            "list_sessions" => self.list_sessions,
+            "ssh_exec" => self.ssh_exec,
+            "sftp_read" => self.sftp_read,
+            "sftp_write" => self.sftp_write,
+            "sftp_transfer" => self.sftp_transfer,
+            "terminal" => self.terminal,
             _ => true,
         }
     }
@@ -728,7 +733,7 @@ fn tools_list(perms: &McpPerms) -> Value {
         "tools": [
             {
                 "name": "list_sessions",
-                "description": "列出 mySSH 已保存的会话档案（id/name/host/port/user/group/kind），不含凭据",
+                "description": "列出 mySSH 已保存的会话档案（id/name/host/port/user/group/kind，不含凭据），并给出每个会话对 AI 的有效授权（ai.level 档位、ai.production 生产标记、ai.tools 各工具组是否放行）、用户打开的标签数 openTabs，以及 AI 可直接使用的终端 aiTerminals（含用户共享给 AI 的标签）。调用其他工具前先看这里，避免对未放行的会话试错。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -1231,7 +1236,7 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
         ));
     }
     match name {
-        "list_sessions" => match list_sessions_tool(&st.store).await {
+        "list_sessions" => match list_sessions_tool(st).await {
             Ok(text) => ok_content(text),
             Err(e) => err_content(e),
         },
@@ -1289,12 +1294,41 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
     }
 }
 
-/// list_sessions：会话档案最小投影，绝不带凭据材料
-async fn list_sessions_tool(store: &Arc<Store>) -> Result<String, String> {
-    let list = store.sessions().list().await.map_err(|e| e.to_string())?;
+/// 权限分组键（list_sessions 按会话展示有效放行情况）
+const PERM_GROUPS: [&str; 6] = [
+    "list_sessions",
+    "ssh_exec",
+    "sftp_read",
+    "sftp_write",
+    "sftp_transfer",
+    "terminal",
+];
+
+/// list_sessions：会话档案最小投影（绝不带凭据材料）+ 每个会话对 AI 的有效授权与连接状态，
+/// 让 agent 不必试错就知道哪些会话能用、哪些命令会被拦或需确认
+async fn list_sessions_tool(st: &ServerState) -> Result<String, String> {
+    let list = st
+        .store
+        .sessions()
+        .list()
+        .await
+        .map_err(|e| e.to_string())?;
+    let groups = crate::mcp_policy::load_group_policies(&st.store).await;
+    let global_level = crate::mcp_policy::load_global_level(&st.store).await;
+    let tabs = st.term_mgr.tabs_by_session();
+    let mut ai_terms = st.terms.live_by_session();
     let items: Vec<Value> = list
         .iter()
         .map(|r| {
+            let eff = crate::mcp_policy::resolve_effective(r, &groups, global_level);
+            let tools: serde_json::Map<String, Value> = PERM_GROUPS
+                .iter()
+                .map(|k| {
+                    let global = st.perms.allows_group(k);
+                    let ok = crate::mcp_policy::resolve_perm(r, &groups, k, global);
+                    ((*k).to_string(), Value::Bool(ok))
+                })
+                .collect();
             json!({
                 "id": r.id,
                 "name": r.name,
@@ -1303,10 +1337,29 @@ async fn list_sessions_tool(store: &Arc<Store>) -> Result<String, String> {
                 "user": r.user,
                 "group": r.group_path,
                 "kind": r.kind.as_str(),
+                "ai": {
+                    "level": crate::mcp_policy::level_str(eff.level),
+                    "production": eff.production,
+                    "tools": tools,
+                },
+                "openTabs": tabs.get(&r.id).copied().unwrap_or(0),
+                "aiTerminals": ai_terms.remove(&r.id).unwrap_or_default(),
             })
         })
         .collect();
-    serde_json::to_string_pretty(&json!({ "sessions": items })).map_err(|e| e.to_string())
+    let body = json!({
+        "sessions": items,
+        "windowOnline": st.ui.has_ui(),
+        "legend": {
+            "ai.level": "readonly = 仅只读白名单命令直接执行，其余拒绝；standard = 无法证明只读的命令需用户确认；full = 仅黑名单需确认",
+            "ai.production": "true 时非只读命令一律需用户确认",
+            "ai.tools": "各工具组对该会话是否放行（false 时调用会被拒绝）；ssh_exec 组含 job_* / recipe_*，terminal 组为 terminal_*",
+            "openTabs": "用户在 mySSH 窗口中为该会话打开的终端标签数",
+            "aiTerminals": "该会话上 AI 可用的终端：agent = AI 打开的标签，shared = 用户共享给 AI 的标签，headless = 后台终端；可直接用于 terminal_send/terminal_read",
+            "windowOnline": "mySSH 窗口是否在线；离线时需确认的命令会被拒绝",
+        },
+    });
+    serde_json::to_string_pretty(&body).map_err(|e| e.to_string())
 }
 
 /// ssh_exec：resolve → Exec Transport（PR-14 复用连接，MCP 配额）→ exec channel 收集
@@ -1355,14 +1408,22 @@ async fn run_exec(
 ) -> Result<Value, String> {
     let store = &st.store;
     tracing::info!(session_id, timeout_ms, action, "MCP 命令开始执行");
+    let mirror = exec_mirror(st, session_id, action, command).await;
     let started = Instant::now();
     let run = async {
         let ctx = crate::exec::ensure_exec_ctx(&st.exec, store, session_id).await?;
         let _permit = ctx.acquire_mcp().await?;
-        ssh_exec_inner(ctx, command.to_string(), strip).await
+        ssh_exec_inner(ctx, command.to_string(), strip, mirror.as_ref()).await
     };
     let result = tokio::time::timeout(Duration::from_millis(timeout_ms), run).await;
     let elapsed = started.elapsed().as_millis() as u64;
+    if let Some(m) = mirror {
+        match &result {
+            Ok(Ok(body)) => m.finish("ok", body["exitCode"].as_u64(), elapsed, None),
+            Ok(Err(e)) => m.finish("error", None, elapsed, Some(e)),
+            Err(_) => m.finish("timeout", None, elapsed, None),
+        }
+    }
 
     let (result_flag, detail) = match &result {
         Ok(Ok(body)) => (
@@ -1387,6 +1448,37 @@ async fn run_exec(
         Ok(Err(e)) => Err(e),
         Err(_) => Err(format!("命令执行超时（{timeout_ms} ms），连接已断开")),
     }
+}
+
+/// 窗口在线且未关闭镜像（mcp.exec_mirror，缺省开启）时，为本次执行建只读镜像
+async fn exec_mirror(
+    st: &ServerState,
+    session_id: &str,
+    action: &str,
+    command: &str,
+) -> Option<crate::mcp_ui::ExecMirror> {
+    if !st.ui.has_ui() {
+        return None;
+    }
+    let raw = st
+        .store
+        .settings()
+        .get("mcp.exec_mirror")
+        .await
+        .ok()
+        .flatten();
+    if !parse_allow_setting(raw.as_deref()) {
+        return None;
+    }
+    let name = st
+        .store
+        .sessions()
+        .get(session_id)
+        .await
+        .map(|r| r.name)
+        .unwrap_or_default();
+    let tool = action.strip_prefix("mcp_").unwrap_or(action);
+    crate::mcp_ui::ExecMirror::begin(&st.ui, session_id, &name, tool, command)
 }
 
 /// recipe_run：渲染内置模板 → 按风险等级过命令门 → 与 ssh_exec 同一执行通路
@@ -1606,6 +1698,7 @@ async fn ssh_exec_inner(
     ctx: Arc<crate::exec::ExecCtx>,
     command: String,
     strip: bool,
+    mirror: Option<&crate::mcp_ui::ExecMirror>,
 ) -> Result<Value, String> {
     // Exec Transport 复用连接（PR-14）：建连/host-key/KI 策略由 exec 组工厂统一承载；
     // 超时 drop 只弃本 channel，共享 Transport 存活
@@ -1623,8 +1716,18 @@ async fn ssh_exec_inner(
     let mut exit_status: Option<u32> = None;
     while let Some(msg) = ch.wait().await {
         match msg {
-            russh::ChannelMsg::Data { data } => stdout.push(&data),
-            russh::ChannelMsg::ExtendedData { data, .. } => stderr.push(&data),
+            russh::ChannelMsg::Data { data } => {
+                if let Some(m) = mirror {
+                    m.push(false, &data);
+                }
+                stdout.push(&data);
+            }
+            russh::ChannelMsg::ExtendedData { data, .. } => {
+                if let Some(m) = mirror {
+                    m.push(true, &data);
+                }
+                stderr.push(&data);
+            }
             russh::ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
             russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
             _ => {}
@@ -2370,9 +2473,126 @@ mod tests {
                 // 放行后进入建连（端口 1 必然失败），不再是策略拒绝
                 assert!(!e.contains("安全策略"), "批准后不应被策略拦截: {e}");
             } else {
+                assert!(
+                    !frames.lock().iter().any(|f| f["type"] == "exec_start"),
+                    "被拒绝的命令不执行也不镜像"
+                );
                 assert!(e.contains("用户拒绝"), "{e}");
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// list_sessions 给出每个会话的有效授权：会话覆盖 → 分组策略 → 全局逐级解析
+    #[tokio::test]
+    async fn list_sessions_reports_effective_access() {
+        let dir = std::env::temp_dir().join(format!("myssh-mcp-ls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir.join("t.db")).await.expect("开库失败"));
+        for (id, group, extra) in [
+            ("prod", "生产", json!({})),
+            (
+                "dev",
+                "开发",
+                json!({ "mcpPerms": { "terminal": true }, "mcpLevel": "full" }),
+            ),
+        ] {
+            let mut v = json!({
+                "id": id, "name": id, "host": "127.0.0.1", "port": 22, "username": "u",
+                "authType": "password", "groupPath": group, "tags": [],
+                "createdAt": "", "updatedAt": ""
+            });
+            merge_json(&mut v, extra);
+            let rec: core_store::SessionRecord = serde_json::from_value(v).unwrap();
+            store.sessions().upsert(&rec).await.unwrap();
+        }
+        let policies = json!({
+            "生产": { "level": "standard", "production": true, "perms": { "ssh_exec": false } }
+        });
+        store
+            .settings()
+            .set(
+                crate::mcp_policy::GROUP_POLICIES_KEY,
+                &serde_json::to_string(&policies).unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut st = test_state(store, crate::mcp_ui::McpUiHub::new());
+        st.perms.terminal = false;
+        let body: Value = serde_json::from_str(&list_sessions_tool(&st).await.unwrap()).unwrap();
+        let by_id = |id: &str| {
+            body["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let prod = by_id("prod");
+        assert_eq!(prod["ai"]["level"], "standard");
+        assert_eq!(prod["ai"]["production"], true);
+        assert_eq!(prod["ai"]["tools"]["ssh_exec"], false, "分组禁 ssh_exec");
+        assert_eq!(prod["ai"]["tools"]["sftp_read"], true);
+        assert_eq!(prod["ai"]["tools"]["terminal"], false, "全局默认关闭");
+        assert_eq!(prod["openTabs"], 0);
+        assert_eq!(prod["aiTerminals"], json!([]));
+        let dev = by_id("dev");
+        assert_eq!(dev["ai"]["level"], "full", "会话覆盖档位");
+        assert_eq!(dev["ai"]["production"], false);
+        assert_eq!(
+            dev["ai"]["tools"]["terminal"], true,
+            "会话覆盖开启 terminal"
+        );
+        assert_eq!(dev["ai"]["tools"]["ssh_exec"], true);
+        assert_eq!(body["windowOnline"], false);
+        assert!(!body.to_string().contains("password\":"), "不含凭据");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 执行镜像：窗口在线时 run_exec 推开始/结束帧（建连失败也要收尾）；关闭设置或无窗口不推
+    #[tokio::test]
+    async fn run_exec_mirrors_to_window() {
+        let dir = std::env::temp_dir().join(format!("myssh-mcp-mirror-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir.join("t.db")).await.expect("开库失败"));
+        let rec: core_store::SessionRecord = serde_json::from_value(json!({
+            "id": "s1", "name": "web-01", "host": "127.0.0.1", "port": 1, "username": "u",
+            "authType": "password", "groupPath": "", "tags": [],
+            "createdAt": "", "updatedAt": ""
+        }))
+        .unwrap();
+        store.sessions().upsert(&rec).await.unwrap();
+        let hub = crate::mcp_ui::McpUiHub::new();
+        let frames = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let fs = frames.clone();
+        hub.set_sink(Arc::new(move |v: &Value| {
+            fs.lock().push(v.clone());
+            true
+        }));
+        let st = test_state(store.clone(), hub);
+        assert!(run_exec(&st, "s1", "uptime", 3000, true, "mcp_ssh_exec")
+            .await
+            .is_err());
+        let got = frames.lock().clone();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0]["type"], "exec_start");
+        assert_eq!(got[0]["tool"], "ssh_exec");
+        assert_eq!(got[0]["sessionName"], "web-01");
+        assert_eq!(got[0]["command"], "uptime");
+        assert_eq!(got[1]["type"], "exec_end");
+        assert_eq!(got[1]["execId"], got[0]["execId"]);
+        assert_eq!(got[1]["status"], "error");
+        assert!(got[1]["error"].is_string());
+
+        store
+            .settings()
+            .set("mcp.exec_mirror", "false")
+            .await
+            .unwrap();
+        frames.lock().clear();
+        let _ = run_exec(&st, "s1", "uptime", 3000, true, "mcp_ssh_exec").await;
+        assert!(frames.lock().is_empty(), "设置关闭后不镜像");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

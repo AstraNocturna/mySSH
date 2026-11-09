@@ -660,6 +660,17 @@ export function SettingsDialog() {
                     </label>
                   ))}
                 </span>
+                <label htmlFor="set-mcp-mirror">{t('dialogs.mcpExecMirror')}</label>
+                <span className="flex items-center gap-2">
+                  {/* 每次执行现读，无需 mcp_restart；缺省开启 */}
+                  <input
+                    id="set-mcp-mirror"
+                    type="checkbox"
+                    checked={settings['mcp.exec_mirror'] !== false}
+                    onChange={(e) => setSetting('mcp.exec_mirror', e.target.checked)}
+                  />
+                  <span className="text-neutral-600">{t('dialogs.mcpExecMirrorHint')}</span>
+                </span>
                 {mcpToken && (
                   <>
                     <span>{t('dialogs.mcpCopyConfig')}</span>

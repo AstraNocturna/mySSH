@@ -29,6 +29,14 @@ import { reconnectRegistry } from '../term/registry';
 import { broadcastInput } from '../term/broadcast';
 import { useTransferStore } from './transfer-store';
 import { tNow } from '../i18n';
+import {
+  feedOf,
+  formatEnd,
+  formatOutput,
+  formatStart,
+  mirrorFeeds,
+  type ExecMirrorFrame,
+} from '../term/exec-mirror';
 
 export type PaneState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error';
 
@@ -99,7 +107,8 @@ type McpUiFrame =
   | Omit<McpApprovalRequest, 'receivedAt'>
   | { type: 'agent_terminal_open'; requestId: string; sessionId: string; sessionName?: string }
   | { type: 'agent_terminal_attached'; tabId: string; terminalId: string; kind: AiTabKind }
-  | { type: 'agent_terminal_closed'; tabId: string };
+  | { type: 'agent_terminal_closed'; tabId: string }
+  | ExecMirrorFrame;
 
 function withoutAiTab(m: Record<string, AiTabKind>, tabId: string): Record<string, AiTabKind> {
   return Object.fromEntries(Object.entries(m).filter(([k]) => k !== tabId));
@@ -121,6 +130,8 @@ export interface Tab {
   layout: LayoutNode;
   panes: Record<string, Pane>;
   activePaneId: string;
+  /** AI 命令镜像标签（只读）：所属会话 id。不连接、不可分屏，内容由 exec-mirror 帧写入 */
+  mirrorOf?: string;
 }
 
 let tabSeq = 1;
@@ -327,15 +338,16 @@ export const useAppStore = create<AppStore>((set, get) => {
         if (req) reportAgentTab(req, null, tNow('state.aiTabClosedByUser'));
         void tab.panes[pid]?.session.close();
       }
+    mirrorFeeds.delete(id);
     const next = tabs.filter((t) => t.id !== id);
     set((s) => ({
       tabs: next,
       activeId: activeId === id ? (next[next.length - 1]?.id ?? null) : activeId,
       bellTabs: s.bellTabs.filter((t) => t !== id),
       // 批次十一：session 类标签压入已关闭栈（cap 10），供 Ctrl+Shift+T 重开；
-      // 快速连接（spec）无档案可重连，不入栈
+      // 快速连接（spec）与 AI 命令镜像无连接可重开，不入栈
       closedTabs:
-        tab && tab.target.kind === 'session'
+        tab && tab.target.kind === 'session' && !tab.mirrorOf
           ? [...s.closedTabs, { sessionId: tab.target.sessionId, title: tab.title }].slice(-10)
           : s.closedTabs,
     }));
@@ -399,6 +411,55 @@ export const useAppStore = create<AppStore>((set, get) => {
       activePaneId: pane.id,
     };
     set((s) => ({ tabs: [...s.tabs, tab], activeId: tabId, showConnect: false }));
+  };
+
+  /** 会话的 AI 命令镜像标签 id；没有则新建（首次出现时切到该标签，让用户看到 AI 在做什么） */
+  const ensureMirrorTab = (sessionId: string, sessionName: string): string => {
+    const found = get().tabs.find((t) => t.mirrorOf === sessionId);
+    if (found) return found.id;
+    const rec = get().sessions.find((r) => r.id === sessionId);
+    const tabId = `${idPrefix}tab${tabSeq++}`;
+    // pane 不 attach（无后端连接）；终态 closed：不计活跃连接、不进广播、关闭无需确认
+    const pane: Pane = { ...makePane(tabId), state: 'closed' };
+    const tab: Tab = {
+      id: tabId,
+      title: `AI · ${sessionName || rec?.name || sessionId}`,
+      target: {
+        kind: 'session',
+        sessionId,
+        sessionKind: 'ssh',
+        encoding: rec?.encoding ?? null,
+      },
+      layout: leaf(pane.id),
+      panes: { [pane.id]: pane },
+      activePaneId: pane.id,
+      mirrorOf: sessionId,
+    };
+    set((s) => ({ tabs: [...s.tabs, tab], activeId: tabId }));
+    return tabId;
+  };
+
+  const onExecMirror = (frame: ExecMirrorFrame) => {
+    // 只在主窗口汇入，避免分离窗口重复开标签
+    if (windowLabel !== 'main') return;
+    if (frame.type === 'exec_start') {
+      const tabId = ensureMirrorTab(frame.sessionId, frame.sessionName);
+      feedOf(tabId).write(formatStart(frame, new Date()));
+      return;
+    }
+    // 执行中途用户关了镜像标签：其余输出丢弃，下条命令再开
+    const tab = get().tabs.find((t) => t.mirrorOf === frame.sessionId);
+    if (!tab) return;
+    const feed = feedOf(tab.id);
+    if (frame.type === 'exec_output') feed.write(formatOutput(frame));
+    else
+      feed.write(
+        formatEnd(frame, feed.atLineStart, {
+          omitted: (n) => tNow('state.mirrorOmitted', { n }),
+          timeout: tNow('state.mirrorTimeout'),
+          error: tNow('state.mirrorError'),
+        }),
+      );
   };
 
   return {
@@ -500,6 +561,12 @@ export const useAppStore = create<AppStore>((set, get) => {
           set((s) => ({ aiTabs: { ...s.aiTabs, [frame.tabId]: frame.kind } }));
         } else if (frame.type === 'agent_terminal_closed') {
           set((s) => ({ aiTabs: withoutAiTab(s.aiTabs, frame.tabId) }));
+        } else if (
+          frame.type === 'exec_start' ||
+          frame.type === 'exec_output' ||
+          frame.type === 'exec_end'
+        ) {
+          onExecMirror(frame);
         }
       };
       void invoke('mcp_ui_subscribe', { events });
@@ -600,7 +667,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
     connectOrActivate: (sessionId, title) => {
       const existing = get().tabs.find(
-        (t) => t.target.kind === 'session' && t.target.sessionId === sessionId,
+        (t) => t.target.kind === 'session' && t.target.sessionId === sessionId && !t.mirrorOf,
       );
       if (existing) set({ activeId: existing.id });
       else get().connectBySession(sessionId, title);
@@ -909,7 +976,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     splitActive: (dir) => {
       const { tabs, activeId } = get();
       const tab = tabs.find((t) => t.id === activeId);
-      if (!tab) return;
+      if (!tab || tab.mirrorOf) return;
       const pane = makePane(tab.id);
       // 6b：新 pane 复用 tab.target（TerminalView 以同一 target attach = 同服务器新通道）。
       // 不再注入 cd 继承源 pane cwd（注入移除，见 makePane 内说明）

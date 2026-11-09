@@ -129,6 +129,10 @@ export const enState: Record<keyof typeof zhState, string> = {
   'state.aiShared': 'Shared with AI (visible to the agent via terminal_list)',
   'state.aiShareFailed': 'Failed to share with AI: {error}',
   'state.aiRevoked': 'AI control revoked',
+  'state.mirrorOmitted':
+    '…mirror shows the first 512 KiB only; {n} bytes omitted (the AI result is truncated separately)',
+  'state.mirrorTimeout': 'timed out',
+  'state.mirrorError': 'failed',
   'state.aiTabOpened': 'AI opened a terminal: {name}',
   'state.aiTabNoSession': 'Session not found or is a local session',
   'state.aiTabClosedByUser': 'The user closed the tab',
