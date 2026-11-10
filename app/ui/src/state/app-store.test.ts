@@ -14,7 +14,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { BROADCAST_INPUT_EVENT, initBroadcastReceiver } from '../term/broadcast';
-import { takeAgentRequest, useAppStore } from './app-store';
+import { APPROVAL_AUTO_RUN_MS, takeAgentRequest, useAppStore } from './app-store';
 import { feedOf } from '../term/exec-mirror';
 import { useAiActivity } from './ai-activity';
 import type { SessionRecord, TermOpenSpec } from '../term/types';
@@ -557,6 +557,45 @@ describe('MCP agent 终端标签', () => {
     vi.mocked(invoke).mockClear();
     push({ type: 'ai_activity' });
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('mcp_activity'));
+    useAppStore.setState({ pendingApprovals: [] });
+  });
+
+  it('「自动执行」：记住过的命令到达即倒计时；取消勾选停止并忘掉规则；勾选后批准带 always', () => {
+    const t0 = Date.now();
+    push({
+      type: 'approval_request',
+      id: 'ap1',
+      sessionId: 's1',
+      command: 'df -h',
+      expiresInMs: 60000,
+      remembered: true,
+    });
+    push({
+      type: 'approval_request',
+      id: 'ap2',
+      sessionId: 's1',
+      command: 'ls',
+      expiresInMs: 60000,
+    });
+    const [a1, a2] = state().pendingApprovals;
+    expect(a1.autoAt).toBeGreaterThanOrEqual(t0 + APPROVAL_AUTO_RUN_MS);
+    expect(a2.autoAt).toBeUndefined();
+
+    vi.mocked(invoke).mockClear();
+    state().setApprovalAuto('ap1', false);
+    expect(invoke).toHaveBeenCalledWith('mcp_forget_always', { id: 'ap1' });
+    expect(state().pendingApprovals[0]).toMatchObject({ autoAt: undefined, remembered: false });
+    // 未记住过的项取消勾选不必通知后端
+    vi.mocked(invoke).mockClear();
+    state().setApprovalAuto('ap2', true);
+    state().setApprovalAuto('ap2', false);
+    state().setApprovalAuto('ap2', true);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(state().pendingApprovals[1].autoAt).toBeGreaterThan(0);
+
+    state().answerApproval('ap2', true, true);
+    expect(invoke).toHaveBeenCalledWith('mcp_approve', { id: 'ap2', allow: true, always: true });
+    expect(state().pendingApprovals.map((a) => a.id)).toEqual(['ap1']);
     useAppStore.setState({ pendingApprovals: [] });
   });
 

@@ -57,7 +57,7 @@ describe('approval-help', () => {
     );
     expect(s.text).toBe('以 root 身份重启服务（短暂中断），失败则查看 systemd 日志（后台运行）');
     expect(s.unknown).toBe('未内置说明的命令：deploy.sh');
-    expect(s.reasons).toBe('间接执行 sudo；可能修改系统 deploy.sh');
+    expect(s.reasons).toBe('sudo 能执行任意命令或改写文件，无法确认只读；可能修改系统 deploy.sh');
   });
 
   it('英文文案：后续步骤首字母小写', () => {
@@ -67,6 +67,69 @@ describe('approval-help', () => {
     );
     expect(s.text).toBe('Show disk space, then delete files or directories (cannot be undone)');
     expect(s.reasons).toBe('high-risk command rm');
+  });
+
+  it('多行脚本只给整体说明；原因指向真正执行的命令，不把关键字当命令', () => {
+    const awk = { head: 'awk', sub: '/^write_bytes/{print $2; exit}', risk: 'indirect' } as const;
+    const ro = (head: string, sub: string | null = null) =>
+      ({ head, sub, risk: 'readonly' }) as const;
+    const command = [
+      '# 两次采样',
+      'declare -A a b',
+      'for p in /proc/[0-9]*; do v=$(awk ... 2>/dev/null); [ -n "$v" ] && a[x]=$v; done',
+      'sleep 5',
+      'for k in "${!b[@]}"; do if [ "$d" -gt 1 ]; then printf x; fi; done | sort -rn | head -12',
+    ].join('\n');
+    const s = summarizeParts(
+      [
+        part({ head: 'declare', cmds: [ro('declare')], op: ';' }),
+        part({ keyword: 'for', head: null, op: ';' }),
+        part({ keyword: null, head: null, cmds: [awk], risk: 'indirect', op: ';' }),
+        part({ head: '[', cmds: [ro('[')], op: '&&' }),
+        part({ head: null, op: ';' }),
+        part({ head: 'sleep', cmds: [ro('sleep', '5')], op: ';' }),
+        part({ keyword: 'for', head: null, op: ';' }),
+        part({ keyword: 'if', head: '[', cmds: [ro('[')], op: ';' }),
+        part({ head: 'printf', cmds: [ro('printf')], op: '|' }),
+        part({ head: 'sort', cmds: [ro('sort')], op: '|' }),
+        part({ head: 'head', sub: '-12', cmds: [ro('head', '-12')] }),
+      ],
+      zh,
+      command,
+    );
+    expect(s.text).toBe(
+      '一段 4 行的脚本（含循环、条件判断），用到 declare（声明变量）、awk（处理文本）、' +
+        '[（判断条件）、sleep（等待一段时间）、printf（按格式输出文本）、sort（对文本排序）等 7 个命令。未发现写文件操作',
+    );
+    expect(s.unknown).toBe('');
+    expect(s.reasons).toBe('awk 能执行任意命令或改写文件，无法确认只读');
+    expect(s.reasons).not.toMatch(/\bdo\b|for|\/dev\/null|declare/);
+  });
+
+  it('改关键环境变量单列原因；脚本写文件时说明写到哪里', () => {
+    const s = summarizeParts(
+      [
+        part({ head: null, cmds: [{ head: 'PATH=', sub: null, risk: 'indirect' }], op: ';' }),
+        part({
+          keyword: 'while',
+          head: 'read',
+          cmds: [{ head: 'read', sub: null, risk: 'readonly' }],
+          op: ';',
+        }),
+        part({
+          head: 'echo',
+          writes: '/tmp/out',
+          risk: 'write',
+          cmds: [{ head: 'echo', sub: null, risk: 'readonly' }],
+        }),
+      ],
+      zh,
+      'PATH=/x\nwhile read l; do echo $l > /tmp/out; done',
+    );
+    expect(s.text).toBe(
+      '一段 2 行的脚本（含循环），用到 read（读入一行到变量）、echo（输出文本）。会写入 /tmp/out',
+    );
+    expect(s.reasons).toBe('修改关键环境变量 PATH；写入文件 /tmp/out');
   });
 
   it('同一说明连续出现只说一次', () => {

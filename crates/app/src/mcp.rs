@@ -1747,17 +1747,6 @@ async fn exec_gate(
     let deny_reason = match verdict {
         Verdict::Allow => None,
         Verdict::Deny => Some(format!("命令超出只读白名单（当前为 {level} 档）")),
-        // 用户此前对本会话同一命令选过「总是允许」
-        Verdict::RequireConfirmation if st.ui.is_always_allowed(session_id, command) => {
-            mcp_audit(
-                st,
-                session_id,
-                &action,
-                &json!({ "command": command, "result": "approved", "rule": "always" }),
-            )
-            .await;
-            None
-        }
         Verdict::RequireConfirmation => {
             let ask = Ask {
                 rec: rec.as_ref(),
@@ -1903,12 +1892,18 @@ async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: As
             json!({
                 "text": p.text,
                 "op": p.op,
+                "keyword": p.keyword,
                 "head": p.head,
                 "sub": p.sub,
                 "wrapper": p.wrapper,
                 "writes": p.writes,
                 "append": p.append,
                 "heredocLines": p.heredoc_lines,
+                "cmds": p.cmds.iter().map(|c| json!({
+                    "head": c.head,
+                    "sub": c.sub,
+                    "risk": c.risk.as_str(),
+                })).collect::<Vec<_>>(),
                 "risk": p.risk.as_str(),
             })
         })
@@ -1921,6 +1916,8 @@ async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: As
         "production": eff.production,
         "parts": parts,
         "purpose": purpose,
+        // 用户此前勾过「自动执行」：前端弹框后倒计时自动批准，可取消
+        "remembered": st.ui.is_always_allowed(session_id, command),
     });
     let id = match st.ui.request(session_id, command, event) {
         Ok(id) => id,
@@ -2744,38 +2741,51 @@ mod tests {
                     {
                         "text": "touch /tmp/x", "op": "&&", "head": "touch", "sub": "/tmp/x",
                         "wrapper": null, "writes": null, "append": false, "heredocLines": 0,
+                        "keyword": null,
+                        "cmds": [{ "head": "touch", "sub": "/tmp/x", "risk": "write" }],
                         "risk": "write"
                     },
                     {
                         "text": "ls", "op": null, "head": "ls", "sub": null,
                         "wrapper": null, "writes": null, "append": false, "heredocLines": 0,
+                        "keyword": null,
+                        "cmds": [{ "head": "ls", "sub": null, "risk": "readonly" }],
                         "risk": "readonly"
                     },
                 ])
             );
             if always {
-                // 同会话同命令再调用：不再弹窗、不被策略拦截
-                let e = ssh_exec_tool(&st, &args("prod")).await.unwrap_err();
-                assert!(!e.contains("安全策略"), "总是允许后不应再拦截: {e}");
-                let asks = frames
+                // 同会话同命令再调用：仍弹窗，但带 remembered 标记（前端预勾选并倒计时自动执行）
+                let mut waited = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    ssh_exec_tool(&st, &args("prod")),
+                )
+                .await;
+                assert!(waited.is_err(), "记住的命令也要等前端确认");
+                let asks: Vec<Value> = frames
                     .lock()
                     .iter()
                     .filter(|f| f["type"] == "approval_request")
-                    .count();
-                assert_eq!(asks, 1, "总是允许后不应再弹审批");
-                // 其他命令照常弹窗等待确认
+                    .cloned()
+                    .collect();
+                assert_eq!(asks.len(), 2, "记住后仍弹审批");
+                assert_eq!(asks[0]["remembered"], false);
+                assert_eq!(asks[1]["remembered"], true);
+                // 其他命令不带 remembered
                 let mut other = args("prod");
                 other["command"] = json!("touch /tmp/y");
-                let waited =
+                waited =
                     tokio::time::timeout(Duration::from_millis(100), ssh_exec_tool(&st, &other))
                         .await;
                 assert!(waited.is_err(), "未决定的审批不应返回");
-                let asks = frames
+                let asks: Vec<Value> = frames
                     .lock()
                     .iter()
                     .filter(|f| f["type"] == "approval_request")
-                    .count();
-                assert_eq!(asks, 2, "其他命令仍需确认");
+                    .cloned()
+                    .collect();
+                assert_eq!(asks.len(), 3);
+                assert_eq!(asks[2]["remembered"], false);
             }
             let e = r.unwrap_err();
             if allow {

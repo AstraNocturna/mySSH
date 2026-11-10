@@ -55,7 +55,20 @@ export interface ApprovalPart {
   append: boolean;
   /** heredoc 正文行数 */
   heredocLines: number;
-  risk: 'readonly' | 'write' | 'unparsed' | 'indirect' | 'blacklist';
+  /** 段首的循环/分支关键字：for / while / until / select / if / case */
+  keyword?: string | null;
+  /** 本段实际执行的命令（含 $( ) 里的） */
+  cmds?: ApprovalCmd[];
+  risk: ApprovalRisk;
+}
+
+export type ApprovalRisk = 'readonly' | 'write' | 'unparsed' | 'indirect' | 'blacklist';
+
+/** 段里实际执行的一个命令；改关键环境变量的纯赋值记为 `PATH=` */
+export interface ApprovalCmd {
+  head: string;
+  sub: string | null;
+  risk: ApprovalRisk;
 }
 
 /** MCP 危险命令审批请求（后端 mcp_ui.rs approval_request 帧 + 前端收到时刻） */
@@ -73,9 +86,16 @@ export interface McpApprovalRequest {
   parts?: ApprovalPart[];
   /** agent 自述的命令用途（未经验证，仅展示） */
   purpose?: string | null;
+  /** 用户此前勾过「自动执行」：弹框后预勾选并倒计时自动批准 */
+  remembered?: boolean;
   /** 前端收到时刻（Date.now），用于倒计时与到期自动关闭 */
   receivedAt: number;
+  /** 「自动执行」已勾选：到这个时刻（Date.now）自动批准并记住规则 */
+  autoAt?: number;
 }
+
+/** 勾选「自动执行」后的等待时长 */
+export const APPROVAL_AUTO_RUN_MS = 3000;
 /** AI 客户端名下的资源数（后端 mcp_clients.rs） */
 export interface AiClientCounts {
   approvals: number;
@@ -158,7 +178,7 @@ export type AiTabKind = 'agent' | 'shared';
 
 /** MCP 前端交互事件帧（后端 mcp_ui.rs / mcp_terminal.rs） */
 type McpUiFrame =
-  | Omit<McpApprovalRequest, 'receivedAt'>
+  | Omit<McpApprovalRequest, 'receivedAt' | 'autoAt'>
   | { type: 'agent_terminal_open'; requestId: string; sessionId: string; sessionName?: string }
   | { type: 'agent_terminal_attached'; tabId: string; terminalId: string; kind: AiTabKind }
   /** closeTab：terminal_close 时 AI 自己开的标签为 true（前端一并关闭）、共享标签为 false；
@@ -250,8 +270,10 @@ interface AppStore {
   /** 订阅 MCP 前端交互事件（App 挂载时调用一次） */
   subscribeMcpUi(): void;
   /** 应答审批并出队；到期未答的由弹窗以 allow=false 出队 */
-  /** always：批准且本会话此命令以后免确认（后端内存规则，应用重启失效） */
+  /** always：「自动执行」勾选状态。批准且勾选 → 记住规则（后端内存，应用重启失效）；否则忘掉 */
   answerApproval(id: string, allow: boolean, always?: boolean): void;
+  /** 勾选/取消「自动执行」：勾选开始 3 秒倒计时；取消即停止倒计时并忘掉已记住的规则 */
+  setApprovalAuto(id: string, on: boolean): void;
   /** 空闲 AI 客户端确认队列（逐个弹框） */
   aiIdlePrompts: AiIdlePrompt[];
   /** release=true 退出该客户端的 AI 托管，false 保留（重新计时） */
@@ -650,7 +672,17 @@ export const useAppStore = create<AppStore>((set, get) => {
           set((s) =>
             s.pendingApprovals.some((a) => a.id === frame.id)
               ? s
-              : { pendingApprovals: [...s.pendingApprovals, { ...frame, receivedAt: Date.now() }] },
+              : {
+                  pendingApprovals: [
+                    ...s.pendingApprovals,
+                    {
+                      ...frame,
+                      receivedAt: Date.now(),
+                      // 记住过的命令：到达即预勾选并开始倒计时
+                      autoAt: frame.remembered ? Date.now() + APPROVAL_AUTO_RUN_MS : undefined,
+                    },
+                  ],
+                },
           );
           useAiActivity.getState().setApprovalHidden(false);
           flashTaskbar();
@@ -755,6 +787,23 @@ export const useAppStore = create<AppStore>((set, get) => {
     answerApproval: (id, allow, always = false) => {
       void invoke('mcp_approve', { id, allow, always }).catch(() => undefined);
       set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) }));
+    },
+
+    setApprovalAuto: (id, on) => {
+      const a = get().pendingApprovals.find((x) => x.id === id);
+      if (!a) return;
+      if (!on && a.remembered) void invoke('mcp_forget_always', { id }).catch(() => undefined);
+      set((s) => ({
+        pendingApprovals: s.pendingApprovals.map((x) =>
+          x.id === id
+            ? {
+                ...x,
+                autoAt: on ? Date.now() + APPROVAL_AUTO_RUN_MS : undefined,
+                remembered: on && x.remembered,
+              }
+            : x,
+        ),
+      }));
     },
 
     answerAiIdle: (clientId, release) => {

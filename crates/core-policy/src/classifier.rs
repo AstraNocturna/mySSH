@@ -63,6 +63,15 @@ const READONLY_WHITELIST: &[&str] = &[
     "printf",
     "true",
     "false",
+    // shell 内建与纯文本过滤：不写文件、不执行参数
+    "[",
+    "test",
+    "sleep",
+    "tr",
+    "cut",
+    "read",
+    "declare",
+    "local",
 ];
 
 /// 全局黑名单：任何档位都强制确认（规格书安全模型第 2 条）
@@ -99,7 +108,48 @@ const BLACKLIST: &[&str] = &[
 const INDIRECT_SHELLS: &[&str] = &[
     "bash", "sh", "dash", "zsh", "ksh", "fish", "eval", "exec", "xargs", "nohup", "sudo", "su",
     "doas", "python", "python3", "perl", "ruby", "node", "awk", "sed",
+    // 把参数当命令执行的前缀命令（不展开判定，宁严勿漏）
+    "nice", "timeout", "stdbuf",
 ];
+
+/// 控制结构关键字：本身不是命令，跳过后看真正执行的命令（time 为 bash 关键字）
+const KEYWORDS_SKIP: &[&str] = &[
+    "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "esac", "{", "}", "!",
+    "time",
+];
+/// 循环/分支头：其后是数据（变量名、取值列表、匹配词），不是命令
+const KEYWORDS_HEADER: &[&str] = &["for", "select", "case"];
+
+/// 改了会影响后续命令如何被找到、加载或执行的变量（如 LD_PRELOAD=x ls）
+fn is_dangerous_var(name: &str) -> bool {
+    name.starts_with("LD_")
+        || name.starts_with("BASH_FUNC")
+        || matches!(
+            name,
+            "PATH"
+                | "IFS"
+                | "BASH_ENV"
+                | "ENV"
+                | "PROMPT_COMMAND"
+                | "PS4"
+                | "SHELLOPTS"
+                | "BASHOPTS"
+                | "CDPATH"
+                | "GLOBIGNORE"
+        )
+}
+
+/// 变量赋值单词（A=1、A+=1、arr[k]=v）返回变量名
+fn assignment_name(word: &str) -> Option<&str> {
+    let (left, _) = word.split_once('=')?;
+    let left = left.strip_suffix('+').unwrap_or(left);
+    let name = match left.split_once('[') {
+        Some((name, rest)) if rest.ends_with(']') => name,
+        Some(_) => return None,
+        None => left,
+    };
+    is_ident(name).then_some(name)
+}
 
 #[derive(Default)]
 pub struct PolicyEngine {
@@ -190,28 +240,38 @@ impl PolicyEngine {
         };
         raw.into_iter()
             .map(|p| {
-                let mut risk = match split_subcommands(&p.scan) {
-                    Ok(subs) => subs
-                        .iter()
-                        .map(|s| sub_risk(s, &whitelist, &blacklist))
-                        .max()
-                        .unwrap_or(PartRisk::ReadOnly),
-                    Err(()) => PartRisk::Unparsed,
+                let (mut risk, cmds) = match split_subcommands(&p.scan) {
+                    Ok(subs) => {
+                        let cmds: Vec<CmdInfo> = subs
+                            .iter()
+                            .filter_map(|s| cmd_info(s, &whitelist, &blacklist))
+                            .collect();
+                        let risk = subs
+                            .iter()
+                            .map(|s| sub_risk(s, &whitelist, &blacklist))
+                            .max()
+                            .unwrap_or(PartRisk::ReadOnly);
+                        (risk, cmds)
+                    }
+                    Err(()) => (PartRisk::Unparsed, Vec::new()),
                 };
                 // 不加引号的 heredoc 会展开 $( ) / 反引号：正文里可能藏命令
                 if p.heredoc_expands {
                     risk = risk.max(PartRisk::Unparsed);
                 }
-                let words = analyze_words(&shell_words(&p.text));
+                // 命令替换里的重定向属于内层命令，不算本段写文件
+                let words = analyze_words(&shell_words(&mask_substitutions(&p.text)));
                 CommandPart {
                     text: p.text,
                     op: p.op,
+                    keyword: words.keyword,
                     head: words.head,
                     sub: words.sub,
                     wrapper: words.wrapper,
                     writes: words.writes,
                     append: words.append,
                     heredoc_lines: p.heredoc_lines,
+                    cmds,
                     risk,
                 }
             })
@@ -226,6 +286,8 @@ pub struct CommandPart {
     pub text: String,
     /// 与下一段之间的连接符：`|` `||` `&&` `;` `&`；末段为 None
     pub op: Option<String>,
+    /// 段首的循环/分支关键字：for / while / until / select / if / case
+    pub keyword: Option<String>,
     /// 主命令名（剥掉环境变量赋值、路径前缀与 sudo 等前缀）
     pub head: Option<String>,
     /// 主命令名后的第一个非选项参数（如 systemctl restart 的 restart）
@@ -238,7 +300,87 @@ pub struct CommandPart {
     pub append: bool,
     /// heredoc 正文行数（无 heredoc 为 0）
     pub heredoc_lines: usize,
+    /// 本段实际执行的命令（含 $( ) 里的），按出现顺序；各自的风险
+    pub cmds: Vec<CmdInfo>,
     pub risk: PartRisk,
+}
+
+/// 一段里实际执行的一个命令
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmdInfo {
+    /// 命令名；改危险变量的纯赋值记为 `PATH=` 形式
+    pub head: String,
+    /// 第一个非选项参数
+    pub sub: Option<String>,
+    pub risk: PartRisk,
+}
+
+fn cmd_info(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> Option<CmdInfo> {
+    let (head, sub_arg) = match split_command(sub)? {
+        Cmd::Nothing { danger: None } => return None,
+        Cmd::Nothing { danger: Some(v) } => (format!("{v}="), None),
+        Cmd::Run { head, args, .. } => (
+            head.to_string(),
+            args.iter()
+                .find(|a| !a.starts_with('-'))
+                .map(|a| a.to_string()),
+        ),
+    };
+    Some(CmdInfo {
+        head,
+        sub: sub_arg,
+        risk: sub_risk(sub, whitelist, blacklist),
+    })
+}
+
+/// 把 $( … ) 与反引号整体换成占位单词（单引号内原样）
+fn mask_substitutions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let (mut in_single, mut in_double) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '\\' if !in_single => {
+                out.push(c);
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+                continue;
+            }
+            '$' if !in_single && chars.peek() == Some(&'(') => {
+                chars.next();
+                let mut depth = 1usize;
+                for c2 in chars.by_ref() {
+                    match c2 {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                out.push_str("$_");
+                continue;
+            }
+            '`' if !in_single => {
+                for c2 in chars.by_ref() {
+                    if c2 == '`' {
+                        break;
+                    }
+                }
+                out.push_str("$_");
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// 单段风险，按严重程度升序（取 max 即该段最高风险）
@@ -270,18 +412,30 @@ impl PartRisk {
 }
 
 fn sub_risk(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> PartRisk {
-    let Some(head) = command_head(sub) else {
-        return PartRisk::Unparsed;
+    let (head, args) = match split_command(sub) {
+        None => return PartRisk::Unparsed,
+        Some(Cmd::Nothing { danger: Some(_) }) => return PartRisk::Indirect,
+        Some(Cmd::Nothing { danger: None }) => {
+            // 纯赋值 / 控制结构；`done > out` 之类仍是写
+            return if has_output_redirect(sub) {
+                PartRisk::Write
+            } else {
+                PartRisk::ReadOnly
+            };
+        }
+        Some(Cmd::Run { head, args, danger }) => {
+            if blacklist.contains(&head) {
+                return PartRisk::Blacklist;
+            }
+            if INDIRECT_SHELLS.contains(&head) || danger.is_some() {
+                return PartRisk::Indirect;
+            }
+            (head, args)
+        }
     };
-    if blacklist.contains(&head) {
-        return PartRisk::Blacklist;
-    }
-    if INDIRECT_SHELLS.contains(&head) {
-        return PartRisk::Indirect;
-    }
     // 白名单只认命令名不够：find -delete、systemctl stop、env rm 等
     // 靠参数写系统或执行任意命令，按参数再判一次
-    let rule = arg_rule(head, &command_args(sub));
+    let rule = arg_rule(head, &args);
     if rule == ArgRule::Indirect {
         return PartRisk::Indirect;
     }
@@ -455,6 +609,13 @@ fn split_top_level(cmd: &str) -> Result<Vec<RawPart>, ()> {
             }
             '(' if depth > 0 && !in_single => depth += 1,
             ')' if depth > 0 && !in_single => depth -= 1,
+            // 注释到行尾不展示也不判定（${#a} / $# 不是注释）
+            '#' if !quoted && cur.text.chars().last().is_none_or(char::is_whitespace) => {
+                while chars.peek().is_some_and(|c| *c != '\n') {
+                    chars.next();
+                }
+                continue;
+            }
             '<' if !quoted && chars.peek() == Some(&'<') => {
                 chars.next();
                 if chars.peek() == Some(&'<') {
@@ -563,6 +724,7 @@ const WRAPPER_VALUE_OPTS: &[&str] = &["-u", "-g", "-C", "-h", "-p", "-n", "-s", 
 
 #[derive(Default)]
 struct Words {
+    keyword: Option<String>,
     head: Option<String>,
     sub: Option<String>,
     wrapper: Option<String>,
@@ -622,12 +784,22 @@ fn analyze_words(words: &[(String, bool)]) -> Words {
         i += if needs_next { 2 } else { 1 };
     }
     let mut rest = positional.into_iter().peekable();
-    // 前导环境变量赋值 A=1 B=2 cmd
-    while rest.peek().is_some_and(|t| {
-        t.split_once('=')
-            .is_some_and(|(k, _)| is_ident(k) && !t.starts_with('/'))
-    }) {
-        rest.next();
+    // 控制结构关键字与前导变量赋值（A=1 arr[k]=v cmd）都不是命令名
+    while let Some(t) = rest.peek().copied() {
+        if KEYWORDS_HEADER.contains(&t) {
+            w.keyword.get_or_insert_with(|| t.to_string());
+            return w;
+        }
+        if KEYWORDS_SKIP.contains(&t) {
+            if matches!(t, "if" | "while" | "until") {
+                w.keyword.get_or_insert_with(|| t.to_string());
+            }
+            rest.next();
+        } else if assignment_name(t).is_some() && !t.starts_with('/') {
+            rest.next();
+        } else {
+            break;
+        }
     }
     let base = |t: &str| t.rsplit('/').next().unwrap_or(t).to_string();
     let mut head = rest.next().map(base);
@@ -655,32 +827,63 @@ fn analyze_words(words: &[(String, bool)]) -> Words {
     w
 }
 
-/// 提取子命令的「主命令名」：剥掉前导环境变量赋值（A=1 B=2 cmd …）与路径前缀。
+/// 子命令实际做什么
+#[derive(Debug, PartialEq, Eq)]
+enum Cmd<'a> {
+    /// 不执行命令：控制结构关键字、for/case 头、纯变量赋值；danger = 改了 PATH 等危险变量
+    Nothing { danger: Option<&'a str> },
+    /// 执行 head；danger = 前导赋值改了危险变量（LD_PRELOAD=x ls）
+    Run {
+        head: &'a str,
+        args: Vec<&'a str>,
+        danger: Option<&'a str>,
+    },
+}
+
+/// 提取子命令的「主命令名」：剥掉控制结构关键字、前导变量赋值（A=1 B=2 cmd …）与路径前缀。
 /// 返回 None 表示结构无法判定（调用方按危险处理）。
+#[cfg(test)]
 fn command_head(sub: &str) -> Option<&str> {
-    split_command(sub).map(|(head, _)| head)
-}
-
-/// 主命令名之后的参数（不含重定向占位符 `>`）
-fn command_args(sub: &str) -> Vec<&str> {
-    split_command(sub).map(|(_, args)| args).unwrap_or_default()
-}
-
-fn split_command(sub: &str) -> Option<(&str, Vec<&str>)> {
-    let mut tokens = sub.split_whitespace();
-    let mut head = tokens.next()?;
-    while head.contains('=')
-        && !head.starts_with('/')
-        && head.split('=').next().is_some_and(is_ident)
-    {
-        head = tokens.next()?;
+    match split_command(sub)? {
+        Cmd::Run { head, .. } => Some(head),
+        Cmd::Nothing { .. } => None,
     }
+}
+
+fn split_command(sub: &str) -> Option<Cmd<'_>> {
+    let mut tokens = sub.split_whitespace().peekable();
+    let mut danger = None;
+    while let Some(&t) = tokens.peek() {
+        if KEYWORDS_HEADER.contains(&t) {
+            return Some(Cmd::Nothing { danger });
+        }
+        if KEYWORDS_SKIP.contains(&t) {
+            tokens.next();
+            continue;
+        }
+        match assignment_name(t) {
+            Some(name) if !t.starts_with('/') => {
+                if is_dangerous_var(name) {
+                    danger = danger.or(Some(name));
+                }
+                tokens.next();
+            }
+            _ => break,
+        }
+    }
+    let Some(head) = tokens.next() else {
+        return Some(Cmd::Nothing { danger });
+    };
     // /bin/rm → rm；/usr/bin/systemctl → systemctl
     let name = head.rsplit('/').next()?;
     if name.is_empty() {
         return None;
     }
-    Some((name, tokens.filter(|t| *t != ">").collect()))
+    Some(Cmd::Run {
+        head: name,
+        args: tokens.filter(|t| *t != ">").collect(),
+        danger,
+    })
 }
 
 /// 参数级判定结果
@@ -814,6 +1017,24 @@ fn arg_rule(head: &str, args: &[&str]) -> ArgRule {
         // 只放行裸 mount 或 -l 列举；带位置参数即挂载
         "mount" => unproven_if(args.iter().any(|a| *a != "-l" && *a != "--show-labels")),
         "ip" => ip_rule(args),
+        // 赋值 / 读入到 PATH、LD_PRELOAD 等会改变后续命令的执行方式
+        "declare" | "local" => {
+            if args
+                .iter()
+                .any(|a| assignment_name(a).is_some_and(is_dangerous_var))
+            {
+                ArgRule::Indirect
+            } else {
+                ArgRule::ReadOnly
+            }
+        }
+        "read" => {
+            if args.iter().any(|a| is_dangerous_var(a)) {
+                ArgRule::Indirect
+            } else {
+                ArgRule::ReadOnly
+            }
+        }
         _ => ArgRule::ReadOnly,
     }
 }
@@ -855,6 +1076,62 @@ fn has_output_redirect(sub: &str) -> bool {
     false
 }
 
+/// `>&2` / `<&-` 的描述符部分
+fn skip_fd(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars
+        .peek()
+        .is_some_and(|c| c.is_ascii_digit() || *c == '-')
+    {
+        chars.next();
+    }
+}
+
+/// 读重定向目标单词（去引号）；目标里有命令替换、或缺目标 → Err（不静态判定）
+fn redirect_target(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<String, ()> {
+    while chars.peek().is_some_and(|c| *c == ' ' || *c == '\t') {
+        chars.next();
+    }
+    let (mut word, mut in_single, mut in_double) = (String::new(), false, false);
+    while let Some(&c) = chars.peek() {
+        if !in_single && !in_double && (c.is_whitespace() || ";|&<>()".contains(c)) {
+            break;
+        }
+        chars.next();
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '`' if !in_single => return Err(()),
+            '$' if !in_single && chars.peek() == Some(&'(') => return Err(()),
+            '\\' if !in_single => word.push(chars.next().ok_or(())?),
+            _ => word.push(c),
+        }
+    }
+    if in_single || in_double || word.is_empty() {
+        return Err(());
+    }
+    Ok(word)
+}
+
+/// `>` 之后：`>>` / `>|`、`>&2` 复制描述符、目标文件。写 /dev/null 不算写文件；
+/// 写真实文件时在子命令里留 `>` 给 has_output_redirect
+fn out_redirect(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    cur: &mut String,
+) -> Result<(), ()> {
+    if matches!(chars.peek(), Some('>') | Some('|')) {
+        chars.next();
+    }
+    if chars.peek() == Some(&'&') {
+        chars.next();
+        skip_fd(chars);
+        return Ok(());
+    }
+    if redirect_target(chars)? != "/dev/null" {
+        cur.push_str(" >");
+    }
+    Ok(())
+}
+
 /// 把复合命令拆成子命令序列：按 | ; && || 与换行切分，尊重单/双引号；
 /// $(…) 与反引号内层命令递归并入序列（黑名单检查必须穿透命令替换）。
 /// 引号/括号不配对 → Err（fail-closed）。
@@ -876,6 +1153,30 @@ fn split_subcommands(cmd: &str) -> Result<Vec<String>, ()> {
             }
             '$' if !in_single && chars.peek() == Some(&'(') => {
                 chars.next(); // 消费 '('
+                if chars.peek() == Some(&'(') {
+                    // $(( 算术 ))：不是命令；里面再嵌命令替换时不静态判定
+                    chars.next();
+                    let (mut depth, mut closed, mut body) = (2usize, false, String::new());
+                    for c2 in chars.by_ref() {
+                        match c2 {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    closed = true;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        body.push(c2);
+                    }
+                    if !closed || body.contains("$(") || body.contains('`') {
+                        return Err(());
+                    }
+                    cur.push('x');
+                    continue;
+                }
                 let mut inner = String::new();
                 let mut depth = 1;
                 let mut closed = false;
@@ -921,13 +1222,39 @@ fn split_subcommands(cmd: &str) -> Result<Vec<String>, ()> {
             '(' | ')' if !in_single && !in_double => {
                 return Err(()); // 子shell/括号结构，M0 不静态判定
             }
-            '|' | ';' | '&' | '\n' | '<' | '>' if !in_single && !in_double => {
-                // 双字符操作符吞掉第二个字符
-                if (c == '|' || c == '&' || c == '>') && chars.peek() == Some(&c) {
+            // 注释到行尾（# 须在单词开头；${#a} / $# 不是注释）
+            '#' if !in_single
+                && !in_double
+                && cur.chars().last().is_none_or(char::is_whitespace) =>
+            {
+                while chars.peek().is_some_and(|c| *c != '\n') {
                     chars.next();
                 }
-                if c == '>' {
-                    cur.push('>'); // 保留给 has_output_redirect 判定
+            }
+            '&' if !in_single && !in_double && chars.peek() == Some(&'>') => {
+                // &> / &>> 同时重定向 stdout 与 stderr
+                chars.next();
+                out_redirect(&mut chars, &mut cur)?;
+            }
+            '>' if !in_single && !in_double => out_redirect(&mut chars, &mut cur)?,
+            '<' if !in_single && !in_double && chars.peek() != Some(&'<') => {
+                if chars.peek() == Some(&'>') {
+                    // <> 以读写方式打开
+                    chars.next();
+                    cur.push('>');
+                }
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    skip_fd(&mut chars);
+                } else {
+                    // 输入文件是数据，不是命令
+                    redirect_target(&mut chars)?;
+                }
+            }
+            '|' | ';' | '&' | '\n' | '<' if !in_single && !in_double => {
+                // 双字符操作符吞掉第二个字符（<< heredoc 正文仍逐行当命令判，宁严勿漏）
+                if (c == '|' || c == '&' || c == '<') && chars.peek() == Some(&c) {
+                    chars.next();
                 }
                 if !cur.trim().is_empty() {
                     out.push(std::mem::take(&mut cur));
@@ -1105,6 +1432,108 @@ mod tests {
         assert_eq!(p.wrapper.as_deref(), Some("timeout"));
         assert_eq!(p.head.as_deref(), Some("ping"));
     }
+    /// 截图里的真实用例：多行排查脚本（循环、条件、命令替换、算术、数组赋值、注释）。
+    /// 关键字不能当命令名，$( ) 里的 2>/dev/null 不是写文件，需要确认只因为 awk
+    const DISK_SCRIPT: &str = r#"# 两次采样 write_bytes
+declare -A a b
+for p in /proc/[0-9]*; do v=$(awk '/^write_bytes/{print $2; exit}' $p/io 2>/dev/null); [ -n "$v" ] && a[${p#/proc/}]=$v; done
+sleep 5
+for p in /proc/[0-9]*; do v=$(awk '/^write_bytes/{print $2; exit}' $p/io 2>/dev/null); [ -n "$v" ] && b[${p#/proc/}]=$v; done
+echo '== 5 秒内写入速率 TOP =='
+for k in "${!b[@]}"; do d=$(( ${b[$k]:-0} - ${a[$k]:-0} )); if [ "$d" -gt 524288 ]; then printf "%8d KB/5s  pid=%s  %s
+" $((d/1024)) "$k" "$(tr ' ' ' ' < /proc/$k/cmdline 2>/dev/null | cut -c1-90)"; fi; done | sort -rn | head -12
+echo '== 累计写量 TOP =='
+for p in /proc/[0-9]*; do v=$(awk '/^write_bytes/{print $2; exit}' $p/io 2>/dev/null); [ -n "$v" ] && echo "$v ${p#/proc/}"; done | sort -rn | head -8 | while read v pid; do printf "%8d MB  pid=%s  %s
+" $((v/1048576)) "$pid" "$(tr ' ' ' ' < /proc/$pid/cmdline 2>/dev/null | cut -c1-80)"; done"#;
+
+    #[test]
+    fn explain_script_with_control_structures() {
+        let e = PolicyEngine::new();
+        let got = e.explain(DISK_SCRIPT);
+        let mut heads: Vec<&str> = got
+            .iter()
+            .flat_map(|p| p.cmds.iter().map(|c| c.head.as_str()))
+            .collect();
+        heads.sort_unstable();
+        heads.dedup();
+        assert_eq!(
+            heads,
+            [
+                "[", "awk", "cut", "declare", "echo", "head", "printf", "read", "sleep", "sort",
+                "tr"
+            ]
+        );
+        for c in got.iter().flat_map(|p| &p.cmds) {
+            let want = if c.head == "awk" {
+                PartRisk::Indirect
+            } else {
+                PartRisk::ReadOnly
+            };
+            assert_eq!(c.risk, want, "{c:?}");
+        }
+        assert!(got.iter().all(|p| p.writes.is_none()), "{got:?}");
+        assert!(got.iter().all(|p| p.risk != PartRisk::Unparsed), "{got:?}");
+        assert!(got.iter().all(|p| !p.text.starts_with('#')), "注释不成段");
+        let kw: Vec<_> = got.iter().filter_map(|p| p.keyword.as_deref()).collect();
+        assert!(kw.contains(&"for") && kw.contains(&"if") && kw.contains(&"while"));
+        assert!(got
+            .iter()
+            .all(|p| !matches!(p.head.as_deref(), Some("do" | "then" | "done" | "fi"))));
+        assert_eq!(
+            e.classify(DISK_SCRIPT, AccessLevel::Standard, false),
+            Verdict::RequireConfirmation
+        );
+        // 不用 awk 的同一脚本可证明只读
+        let ro = DISK_SCRIPT.replace("awk '/^write_bytes/{print $2; exit}'", "cat");
+        assert_eq!(
+            e.classify(&ro, AccessLevel::Standard, false),
+            Verdict::Allow,
+            "{:?}",
+            e.explain(&ro)
+        );
+    }
+
+    #[test]
+    fn redirects_assignments_and_wrappers() {
+        let e = PolicyEngine::new();
+        let v = |c: &str, l| e.classify(c, l, false);
+        use AccessLevel::{Full, Standard};
+        assert_eq!(v("ls 2>/dev/null", Standard), Verdict::Allow);
+        assert_eq!(v("ls &>/dev/null; df -h 2>&1", Standard), Verdict::Allow);
+        assert_eq!(v("cat < /etc/hosts", Standard), Verdict::Allow);
+        assert_eq!(v("ls > /tmp/a", Standard), Verdict::RequireConfirmation);
+        assert_eq!(
+            v("ls >> '/tmp/a b'", Standard),
+            Verdict::RequireConfirmation
+        );
+        assert_eq!(v("x=$(uptime); echo \"$x\"", Standard), Verdict::Allow);
+        assert_eq!(v("echo $((1 + 2))", Standard), Verdict::Allow);
+        assert_eq!(
+            v("echo $(( $(rm -rf /) ))", Full),
+            Verdict::RequireConfirmation
+        );
+        assert_eq!(v("# 注释 rm -rf /\nuptime", Standard), Verdict::Allow);
+        assert_eq!(v("if true; then ls; fi", Standard), Verdict::Allow);
+        assert_eq!(
+            v("while true; do rm -rf /tmp/x; done", Full),
+            Verdict::RequireConfirmation
+        );
+        // 改变后续命令执行方式的变量：任何档位都要确认
+        for c in [
+            "LD_PRELOAD=/tmp/x.so ls",
+            "PATH=/tmp; ls",
+            "declare PATH=/tmp",
+            "read IFS",
+        ] {
+            assert_eq!(v(c, Full), Verdict::RequireConfirmation, "{c}");
+        }
+        // 前缀命令执行其参数：完全档也不能绕过黑名单
+        for c in ["timeout 5 rm -rf /", "nice rm -rf /", "time rm -rf /"] {
+            assert_eq!(v(c, Full), Verdict::RequireConfirmation, "{c}");
+        }
+        assert_eq!(e.explain("PATH=/tmp/x")[0].cmds[0].head, "PATH=");
+    }
+
     /// 逐段风险与整条判定一致：standard 档放行 ⇔ 每段都只读；确认 ⇔ 存在非只读段
     #[test]
     fn explain_agrees_with_classify() {
