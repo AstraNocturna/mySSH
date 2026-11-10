@@ -106,7 +106,7 @@ For the tool list, permission rules and command policy, see the [AI integration 
 
 ## Build from source
 
-Requires Rust stable, Node.js 20+, Windows 10/11 (WebView2 Runtime).
+Requires rustup (the Rust version is pinned in `rust-toolchain.toml` at the repo root and installed automatically on first build), Node.js 20+, Windows 10/11 (WebView2 Runtime).
 
 ```bash
 # Frontend

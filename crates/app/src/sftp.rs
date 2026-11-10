@@ -801,7 +801,7 @@ pub async fn shell_integration_set(
             core_sftp::remove_integration(&content)
         };
         if next != content {
-            mc.overwrite(path, next.as_bytes()).await.map_err(&rec)?;
+            mc.overwrite(path, next.as_bytes()).await.map_err(rec)?;
             touched.push(path.clone());
         }
     }
@@ -811,14 +811,14 @@ pub async fn shell_integration_set(
     if enable {
         let dir = format!("{home}/.myssh");
         if mc.lstat(&dir).await.is_err() {
-            mc.mkdir(&dir).await.map_err(&rec)?;
+            mc.mkdir(&dir).await.map_err(rec)?;
         }
         mc.overwrite(&script, core_sftp::SCRIPT.as_bytes())
             .await
-            .map_err(&rec)?;
+            .map_err(rec)?;
         touched.push(script);
     } else if mc.lstat(&script).await.is_ok() {
-        mc.remove_file(&script).await.map_err(&rec)?;
+        mc.remove_file(&script).await.map_err(rec)?;
         // 目录空则顺带收掉；非空（用户自己放了东西）remove_dir 会失败，忽略
         let _ = mc.remove_dir(&format!("{home}/.myssh")).await;
         touched.push(script);
