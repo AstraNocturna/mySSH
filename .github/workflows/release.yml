@@ -56,7 +56,7 @@ jobs:
             platforms = [ordered]@{
               'windows-x86_64' = [ordered]@{
                 signature = $sig
-                url       = "https://github.com/xinchen2003/mySSH/releases/download/$tag/$setup"
+                url       = "https://github.com/AstraNocturna/mySSH/releases/download/$tag/$setup"
               }
             }
           }

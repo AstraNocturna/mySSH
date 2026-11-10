@@ -65,8 +65,8 @@
 - 确认弹窗：Enter = 确认（全部确认框）；2FA 弹窗输入框 Enter = 提交
 - 安全：移除登录后 shell 注入（stty/OSC 7 钩子、分屏 cd）；OSC 7 改纯被动解析
 
-[Unreleased]: https://github.com/xinchen2003/mySSH/compare/v0.3.4...HEAD
-[0.3.4]: https://github.com/xinchen2003/mySSH/releases/tag/v0.3.4
-[0.3.3]: https://github.com/xinchen2003/mySSH/releases/tag/v0.3.3
-[0.3.2]: https://github.com/xinchen2003/mySSH/releases/tag/v0.3.2
-[0.3.1]: https://github.com/xinchen2003/mySSH/releases/tag/v0.3.1
+[Unreleased]: https://github.com/AstraNocturna/mySSH/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/AstraNocturna/mySSH/releases/tag/v0.3.4
+[0.3.3]: https://github.com/AstraNocturna/mySSH/releases/tag/v0.3.3
+[0.3.2]: https://github.com/AstraNocturna/mySSH/releases/tag/v0.3.2
+[0.3.1]: https://github.com/AstraNocturna/mySSH/releases/tag/v0.3.1
