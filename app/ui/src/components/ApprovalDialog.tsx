@@ -19,6 +19,8 @@ function firstLine(cmd: string): string {
  * 与 HostKeyDialog 同一防误触规则：默认焦点在「拒绝」、Esc = 拒绝、点遮罩不关闭；
  * 到期（后端 TTL，从请求时刻起算）未决自动按拒绝出队。
  * 多会话并发时左栏按会话分组列出全部待确认项；批量操作只有「拒绝本会话全部」，允许必须逐条。
+ * 「自动执行」勾选框：勾上 3 秒后自动批准并记住规则；记住过的命令再来时预勾选并倒计时；
+ * 倒计时中取消勾选即停止并忘掉规则。
  */
 export function ApprovalDialog() {
   const t = useT();
@@ -29,18 +31,23 @@ export function ApprovalDialog() {
   const focusApproval = useAiActivity((s) => s.focusApproval);
   const hidden = useAiActivity((s) => s.approvalHidden);
   const setHidden = useAiActivity((s) => s.setApprovalHidden);
+  const setAuto = useAppStore((s) => s.setApprovalAuto);
   const [now, setNow] = useState(() => Date.now());
   const any = approvals.length > 0;
 
   useEffect(() => {
     if (!any) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    // 250ms：3 秒自动执行的倒计时要按时触发、读秒不跳
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, [any]);
 
-  // 未选中、收起状态下的项同样到期出队
+  // 未选中、收起状态下的项同样到期出队；勾了「自动执行」的到点批准并记住
   useEffect(() => {
-    approvals.filter((a) => remainingMs(a, now) <= 0).forEach((a) => answer(a.id, false));
+    approvals.forEach((a) => {
+      if (a.autoAt !== undefined && now >= a.autoAt) answer(a.id, true, true);
+      else if (remainingMs(a, now) <= 0) answer(a.id, false);
+    });
   }, [approvals, now, answer]);
 
   if (!any) return null;
@@ -71,7 +78,10 @@ export function ApprovalDialog() {
   const group = rec?.groupPath ? rec.groupPath.replace(/\//g, ' / ') : t('chrome.ungrouped');
   const deny = () => answer(current.id, false);
   const prod = current.production === true;
-  const summary = current.parts?.length ? summarizeParts(current.parts, t) : null;
+  const summary = current.parts?.length ? summarizeParts(current.parts, t, current.command) : null;
+  const autoAt = current.autoAt;
+  const autoOn = autoAt !== undefined;
+  const secLeft = Math.max(0, Math.ceil(remainingMs(current, now) / 1000));
   const multi = approvals.length > 1;
   const jump = () => {
     if (!rec) return;
@@ -199,11 +209,26 @@ export function ApprovalDialog() {
             )}
           </div>
         )}
-        <p className="mb-3 text-xs text-neutral-400">
-          {t('dialogs.approvalHint', {
-            sec: Math.max(0, Math.ceil(remainingMs(current, now) / 1000)),
-          })}
-        </p>
+        <p className="mb-3 text-xs text-neutral-400">{t('dialogs.approvalHint')}</p>
+        <label
+          className="mb-3 flex cursor-pointer items-center gap-2 text-xs"
+          title={t('dialogs.approvalAlwaysHint')}
+        >
+          <input
+            type="checkbox"
+            className="accent-amber-500"
+            checked={autoOn}
+            onChange={(e) => setAuto(current.id, e.target.checked)}
+          />
+          <span>{t('dialogs.approvalAlways')}</span>
+          {autoOn && (
+            <span className="rounded bg-amber-700/70 px-1.5 text-amber-50">
+              {t('dialogs.approvalAutoIn', {
+                sec: Math.max(0, Math.ceil((autoAt - now) / 1000)),
+              })}
+            </span>
+          )}
+        </label>
         <div className="flex items-center justify-end gap-2">
           {sameSession.length > 1 && (
             <button
@@ -219,21 +244,15 @@ export function ApprovalDialog() {
             className="rounded bg-neutral-700 px-3 py-1 hover:bg-neutral-600"
             onClick={deny}
           >
-            {t('dialogs.approvalDeny')}
-          </button>
-          <button
-            className="rounded border border-neutral-600 px-3 py-1 hover:bg-neutral-800"
-            onClick={() => answer(current.id, true, true)}
-          >
-            {t('dialogs.approvalAlways')}
+            {t('dialogs.approvalDeny', { sec: secLeft })}
           </button>
           <button
             className={`rounded px-3 py-1 text-white ${
               prod ? 'bg-red-600 hover:bg-red-500' : 'bg-amber-600 hover:bg-amber-500'
             }`}
-            onClick={() => answer(current.id, true)}
+            onClick={() => answer(current.id, true, autoOn)}
           >
-            {t('dialogs.approvalAllow')}
+            {t(autoOn ? 'dialogs.approvalAllowNow' : 'dialogs.approvalAllow')}
           </button>
         </div>
         <p className="mt-2 text-right text-[11px] text-neutral-500">

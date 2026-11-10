@@ -381,6 +381,15 @@ impl McpUiHub {
         self.decide(id, true)
     }
 
+    /// 忘掉该审批项对应的「自动执行」规则（用户取消勾选或拒绝）
+    pub(crate) fn forget_always(&self, id: &str) {
+        let key = match self.approvals.lock().get(id) {
+            Some(a) => (a.session_id.clone(), a.command.clone()),
+            None => return,
+        };
+        self.always.lock().remove(&key);
+    }
+
     /// 同会话同命令是否已被用户「总是允许」
     pub(crate) fn is_always_allowed(&self, session_id: &str, command: &str) -> bool {
         self.always
@@ -516,7 +525,8 @@ pub async fn mcp_ui_subscribe(
     Ok(())
 }
 
-/// 用户对审批项的决定；always = 批准且本会话此命令以后免确认（至应用重启）
+/// 用户对审批项的决定。always = 「自动执行」勾选框的状态：批准且勾选 → 记下规则
+///（本会话此命令以后弹框后自动倒计时批准，至应用重启）；未勾选或拒绝 → 忘掉规则
 #[tauri::command]
 pub async fn mcp_approve(
     hub: tauri::State<'_, Arc<McpUiHub>>,
@@ -527,7 +537,20 @@ pub async fn mcp_approve(
     if allow && always == Some(true) {
         return Ok(hub.allow_always(&id));
     }
+    if always.is_some() {
+        hub.forget_always(&id);
+    }
     Ok(hub.decide(&id, allow))
+}
+
+/// 用户在倒计时中取消勾选「自动执行」：立即忘掉规则，审批项继续等待决定
+#[tauri::command]
+pub async fn mcp_forget_always(
+    hub: tauri::State<'_, Arc<McpUiHub>>,
+    id: String,
+) -> Result<(), String> {
+    hub.forget_always(&id);
+    Ok(())
 }
 
 /// AI 活动快照：进行中的一次性命令、运行中的后台命令、未关闭的 AI 终端
@@ -768,6 +791,28 @@ mod tests {
         // 已消费/未知审批项不能借机记规则
         assert!(!hub.allow_always(&id));
         assert!(!hub.allow_always("nope"));
+    }
+
+    #[tokio::test]
+    async fn forget_always_drops_rule_but_keeps_approval_pending() {
+        let (hub, _) = hub_with_sink();
+        let first = hub.request("s", "df -h", json!({})).unwrap();
+        assert!(hub.allow_always(&first));
+        assert_eq!(
+            hub.wait(&first, Duration::from_millis(10)).await,
+            ApprovalWait::Approved
+        );
+        let again = hub.request("s", "df -h", json!({})).unwrap();
+        assert!(hub.is_always_allowed("s", "df -h"));
+        hub.forget_always(&again);
+        assert!(!hub.is_always_allowed("s", "df -h"));
+        // 忘规则不等于决定：审批项仍在等用户
+        assert!(matches!(
+            hub.wait(&again, Duration::from_millis(10)).await,
+            ApprovalWait::Pending(_)
+        ));
+        assert!(hub.decide(&again, false));
+        hub.forget_always("nope");
     }
 
     #[tokio::test]

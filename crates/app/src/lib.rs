@@ -234,6 +234,7 @@ pub fn run() {
             mcp::mcp_restart,
             mcp_ui::mcp_ui_subscribe,
             mcp_ui::mcp_approve,
+            mcp_ui::mcp_forget_always,
             mcp_ui::mcp_activity,
             mcp_ui::mcp_activity_stop,
             mcp_ui::mcp_agent_tab_ready,
