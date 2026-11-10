@@ -76,6 +76,37 @@ export interface McpApprovalRequest {
   /** 前端收到时刻（Date.now），用于倒计时与到期自动关闭 */
   receivedAt: number;
 }
+/** AI 客户端名下的资源数（后端 mcp_clients.rs） */
+export interface AiClientCounts {
+  approvals: number;
+  execs: number;
+  jobs: number;
+  terminals: number;
+  mirrors: number;
+}
+
+/** 没开长连接的 AI 客户端空闲到期：请用户确认是否退出它的 AI 托管 */
+export interface AiIdlePrompt extends AiClientCounts {
+  clientId: string;
+  name: string;
+  idleMinutes: number;
+}
+
+/** 资源清单文案：「2 项待确认命令、1 个 AI 终端」；全为 0 时为空串 */
+export function aiClientItems(c: AiClientCounts): string {
+  const labels = {
+    approvals: 'state.aiItem.approvals',
+    execs: 'state.aiItem.execs',
+    jobs: 'state.aiItem.jobs',
+    terminals: 'state.aiItem.terminals',
+    mirrors: 'state.aiItem.mirrors',
+  } as const;
+  return (Object.keys(labels) as (keyof AiClientCounts)[])
+    .filter((k) => c[k] > 0)
+    .map((k) => tNow(labels[k], { n: c[k] }))
+    .join(tNow('state.aiItemSep'));
+}
+
 /** 底部 dock 页签（DevTools 风格工具面板）；单值天然互斥 */
 export type DockTab = 'sftp' | 'metrics' | 'tunnel' | 'transfer';
 /** 通知分级（批次一 7.7）：success/info 短时自动消失，warning 较长，error 常驻手动关 */
@@ -135,6 +166,19 @@ type McpUiFrame =
   | { type: 'agent_terminal_closed'; tabId: string; closeTab?: boolean }
   /** AI 活动（进行中命令 / 后台命令 / AI 终端）有变化：前端再取 mcp_activity 快照 */
   | { type: 'ai_activity' }
+  /** AI 客户端断开清理时拒绝的待确认项：关掉对应授权框 */
+  | { type: 'approval_closed'; id: string }
+  /** AI 客户端断开：关掉它用过的命令镜像分屏 */
+  | { type: 'mirror_close'; sessionId: string }
+  | ({
+      type: 'ai_client_released';
+      clientId: string;
+      name: string;
+      reason: 'disconnected' | 'ended' | 'idle';
+    } & AiClientCounts)
+  | ({ type: 'ai_client_idle' } & AiIdlePrompt)
+  /** 客户端又有动作 / MCP 服务重启：空闲确认作废 */
+  | { type: 'ai_client_idle_closed'; clientId: string }
   | ExecMirrorFrame;
 
 function withoutAiTab(m: Record<string, AiTabKind>, tabId: string): Record<string, AiTabKind> {
@@ -208,6 +252,10 @@ interface AppStore {
   /** 应答审批并出队；到期未答的由弹窗以 allow=false 出队 */
   /** always：批准且本会话此命令以后免确认（后端内存规则，应用重启失效） */
   answerApproval(id: string, allow: boolean, always?: boolean): void;
+  /** 空闲 AI 客户端确认队列（逐个弹框） */
+  aiIdlePrompts: AiIdlePrompt[];
+  /** release=true 退出该客户端的 AI 托管，false 保留（重新计时） */
+  answerAiIdle(clientId: string, release: boolean): void;
   /** AI 控制中的终端（键 = 后端 tabId） */
   aiTabs: Record<string, AiTabKind>;
   /** 把终端共享给 AI / 收回 AI 控制（参数为后端 tabId） */
@@ -534,6 +582,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     pendingHostKeys: [],
     pendingKis: [],
     pendingApprovals: [],
+    aiIdlePrompts: [],
     aiTabs: {},
     editing: null,
     connectPreset: null,
@@ -607,6 +656,52 @@ export const useAppStore = create<AppStore>((set, get) => {
           flashTaskbar();
         } else if (frame.type === 'ai_activity') {
           useAiActivity.getState().refresh();
+        } else if (frame.type === 'approval_closed') {
+          set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== frame.id) }));
+        } else if (frame.type === 'mirror_close') {
+          for (const t of get().tabs) {
+            if (!isSessionTab(t, frame.sessionId)) continue;
+            for (const p of Object.values(t.panes)) if (p.mirror) get().closePane(t.id, p.id);
+          }
+        } else if (frame.type === 'ai_client_released') {
+          set((s) => ({
+            aiIdlePrompts: s.aiIdlePrompts.filter((p) => p.clientId !== frame.clientId),
+          }));
+          const items = aiClientItems(frame);
+          if (!items) return;
+          const name = frame.name || tNow('state.aiClientUnnamed');
+          get().notify(
+            tNow(
+              frame.reason === 'idle' ? 'state.aiClientReleasedIdle' : 'state.aiClientReleased',
+              {
+                name,
+                items,
+              },
+            ),
+            'warning',
+          );
+        } else if (frame.type === 'ai_client_idle') {
+          const prompt: AiIdlePrompt = {
+            clientId: frame.clientId,
+            name: frame.name,
+            idleMinutes: frame.idleMinutes,
+            approvals: frame.approvals,
+            execs: frame.execs,
+            jobs: frame.jobs,
+            terminals: frame.terminals,
+            mirrors: frame.mirrors,
+          };
+          set((s) => ({
+            aiIdlePrompts: [
+              ...s.aiIdlePrompts.filter((p) => p.clientId !== prompt.clientId),
+              prompt,
+            ],
+          }));
+          flashTaskbar();
+        } else if (frame.type === 'ai_client_idle_closed') {
+          set((s) => ({
+            aiIdlePrompts: s.aiIdlePrompts.filter((p) => p.clientId !== frame.clientId),
+          }));
         } else if (frame.type === 'agent_terminal_open') {
           // 标签窗口只在主窗口开，避免分离窗口重复开
           if (windowLabel !== 'main') return;
@@ -660,6 +755,13 @@ export const useAppStore = create<AppStore>((set, get) => {
     answerApproval: (id, allow, always = false) => {
       void invoke('mcp_approve', { id, allow, always }).catch(() => undefined);
       set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) }));
+    },
+
+    answerAiIdle: (clientId, release) => {
+      void invoke('mcp_client_idle_answer', { clientId, releaseIt: release }).catch(
+        () => undefined,
+      );
+      set((s) => ({ aiIdlePrompts: s.aiIdlePrompts.filter((p) => p.clientId !== clientId) }));
     },
 
     shareTabWithAi: async (backendTabId) => {

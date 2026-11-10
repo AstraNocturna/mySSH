@@ -12,6 +12,7 @@ mod lifecycle;
 mod local_pty;
 mod logging;
 mod mcp;
+mod mcp_clients;
 mod mcp_files;
 mod mcp_jobs;
 mod mcp_policy;
@@ -76,6 +77,7 @@ pub fn run() {
     let mcp_terms = mcp_terminal::McpTerminalState::new();
     let mcp_jobs = mcp_jobs::McpJobs::new();
     let mcp_ui_hub = mcp_ui::McpUiHub::new();
+    let mcp_clients = mcp_clients::McpClients::new();
     let term_mgr = Arc::new(TerminalManager::default());
     let ai_backups = mcp_files::BackupStore::new(mcp_files::BackupStore::default_root());
     let recordings = recording::RecordingStore::new(
@@ -106,6 +108,7 @@ pub fn run() {
         .manage(mcp_terms.clone())
         .manage(mcp_jobs.clone())
         .manage(mcp_ui_hub.clone())
+        .manage(mcp_clients.clone())
         .manage(ai_backups.clone())
         .manage(recordings.clone())
         .setup(move |app| {
@@ -128,6 +131,7 @@ pub fn run() {
                 backups: ai_backups.clone(),
                 jobs: mcp_jobs.clone(),
                 recs: recordings.clone(),
+                clients: mcp_clients.clone(),
             };
             tauri::async_runtime::spawn(async move {
                 crate::mcp::boot_from_settings(mcp_manager, deps).await;
@@ -233,6 +237,7 @@ pub fn run() {
             mcp_ui::mcp_activity,
             mcp_ui::mcp_activity_stop,
             mcp_ui::mcp_agent_tab_ready,
+            mcp_clients::mcp_client_idle_answer,
             mcp_terminal::mcp_share_tab,
             mcp_terminal::mcp_unshare_tab,
             mcp_files::ai_backups_list,

@@ -61,6 +61,8 @@ pub(crate) struct Job {
     out: Mutex<TermBuf>,
     status: Mutex<(JobStatus, Option<Instant>)>,
     stop: tokio::sync::Notify,
+    /// 启动它的 MCP 客户端（客户端断开时据此停止）
+    owner: Option<String>,
 }
 
 impl Job {
@@ -73,6 +75,7 @@ impl Job {
             out: Mutex::new(TermBuf::default()),
             status: Mutex::new((JobStatus::Running, None)),
             stop: tokio::sync::Notify::new(),
+            owner: crate::mcp_clients::current(),
         }
     }
 
@@ -165,6 +168,36 @@ impl McpJobs {
         let id = format!("{:016x}", rand::random::<u64>());
         map.insert(id.clone(), job);
         Ok(id)
+    }
+
+    /// 某客户端运行中的后台命令数
+    pub(crate) fn owned_running(&self, owner: &str) -> usize {
+        self.jobs
+            .lock()
+            .values()
+            .filter(|j| j.owner.as_deref() == Some(owner) && j.running())
+            .count()
+    }
+
+    /// 客户端断开：终止并移除它的后台命令（没人再读输出）；返回终止的运行中条数
+    pub(crate) fn stop_owned(&self, owner: &str) -> usize {
+        let mine: Vec<Arc<Job>> = {
+            let mut map = self.jobs.lock();
+            let ids: Vec<String> = map
+                .iter()
+                .filter(|(_, j)| j.owner.as_deref() == Some(owner))
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| map.remove(id)).collect()
+        };
+        let mut stopped = 0;
+        for j in mine {
+            if j.running() {
+                j.stop.notify_one();
+                stopped += 1;
+            }
+        }
+        stopped
     }
 
     /// MCP 停止：终止全部运行中的命令

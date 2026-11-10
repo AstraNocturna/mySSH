@@ -730,6 +730,87 @@ describe('MCP agent 终端标签', () => {
     expect(state().aiTabs).toEqual({});
   });
 
+  describe('AI 客户端断开：退出 AI 托管', () => {
+    const counts = { approvals: 0, execs: 0, jobs: 0, terminals: 0, mirrors: 0 };
+
+    it('清理时被拒绝的待确认项关掉授权框，别的保留', () => {
+      for (const id of ['ap1', 'ap2'])
+        push({ type: 'approval_request', id, sessionId: 's1', command: 'rm x', expiresInMs: 1000 });
+      push({ type: 'approval_closed', id: 'ap1' });
+      expect(state().pendingApprovals.map((a) => a.id)).toEqual(['ap2']);
+      useAppStore.setState({ pendingApprovals: [] });
+    });
+
+    it('mirror_close 关闭该会话的镜像分屏，终端保留', () => {
+      useAppStore.setState({ sessions: [rec] });
+      push({
+        type: 'exec_start',
+        execId: 'e1',
+        sessionId: 's1',
+        sessionName: 'web-01',
+        tool: 'ssh_exec',
+        command: 'id',
+      });
+      const termPane = state().tabs[0].activePaneId;
+      push({ type: 'mirror_close', sessionId: 's1' });
+      expect(state().tabs).toHaveLength(1);
+      expect(Object.keys(state().tabs[0].panes)).toEqual([termPane]);
+    });
+
+    it('断开通知列出清理内容；没有可清理的不打扰', () => {
+      push({
+        type: 'ai_client_released',
+        clientId: 'c1',
+        name: 'claude-code',
+        reason: 'disconnected',
+        ...counts,
+        approvals: 2,
+        terminals: 1,
+      });
+      const n = state().notices.at(-1);
+      expect(n?.message).toBe(
+        '「claude-code」已断开，已自动退出 AI 托管并清理：2 项待确认命令、1 个 AI 终端（标签保留）',
+      );
+      const before = state().notices.length;
+      push({ type: 'ai_client_released', clientId: 'c2', name: '', reason: 'ended', ...counts });
+      expect(state().notices).toHaveLength(before);
+    });
+
+    it('空闲确认：入队、作答回报后端并出队；客户端又有动作则作废', () => {
+      const idle = (clientId: string) =>
+        push({
+          type: 'ai_client_idle',
+          clientId,
+          name: 'codex',
+          idleMinutes: 30,
+          ...counts,
+          jobs: 1,
+        });
+      idle('c1');
+      idle('c1'); // 同一客户端不重复入队
+      idle('c2');
+      expect(state().aiIdlePrompts.map((p) => p.clientId)).toEqual(['c1', 'c2']);
+      expect(state().aiIdlePrompts[0]).not.toHaveProperty('type');
+      state().answerAiIdle('c1', true);
+      expect(invoke).toHaveBeenCalledWith('mcp_client_idle_answer', {
+        clientId: 'c1',
+        releaseIt: true,
+      });
+      push({ type: 'ai_client_idle_closed', clientId: 'c2' });
+      expect(state().aiIdlePrompts).toEqual([]);
+      // 已清理（如用户确认后）的客户端：残留确认框一并移除
+      idle('c3');
+      push({
+        type: 'ai_client_released',
+        clientId: 'c3',
+        name: 'codex',
+        reason: 'idle',
+        ...counts,
+      });
+      expect(state().aiIdlePrompts).toEqual([]);
+    });
+  });
+
   it('共享失败（权限未放行）只提示错误，不打标记', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) =>
       cmd === 'mcp_share_tab' ? Promise.reject(new Error('denied')) : Promise.resolve(undefined),

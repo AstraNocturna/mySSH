@@ -155,6 +155,7 @@ dependencies = [
  "core-store",
  "core-tunnel",
  "encoding_rs",
+ "futures-util",
  "parking_lot",
  "portable-pty",
  "rand",

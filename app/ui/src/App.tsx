@@ -20,6 +20,7 @@ import { ConnectDialog } from './components/ConnectDialog';
 import { HostKeyDialog } from './components/HostKeyDialog';
 import { ApprovalDialog } from './components/ApprovalDialog';
 import { AiActivityPanel } from './components/AiActivityPanel';
+import { AiIdleDialog } from './components/AiIdleDialog';
 import { KiDialog } from './components/KiDialog';
 import { BottomDock } from './components/BottomDock';
 import { TransferIndicator } from './components/TransferIndicator';
@@ -272,6 +273,7 @@ export function App() {
       <HostKeyDialog />
       <ApprovalDialog />
       <AiActivityPanel />
+      <AiIdleDialog />
       <KiDialog />
       {paletteOpen && <CommandPalette />}
       {snippetsOpen && <SnippetsDialog />}
