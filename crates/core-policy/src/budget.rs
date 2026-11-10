@@ -154,7 +154,7 @@ impl Budget {
     /// CAS 扣减：Ok(()) 或 Err(当前用量)
     fn cas_take(&self) -> Result<(), usize> {
         self.used
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |u| {
                 if u < self.cap {
                     Some(u + 1)
                 } else {
