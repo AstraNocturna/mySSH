@@ -132,6 +132,7 @@ export const enState: Record<keyof typeof zhState, string> = {
   'state.mirrorOmitted':
     '…mirror shows the first 512 KiB only; {n} bytes omitted (the AI result is truncated separately)',
   'state.mirrorTimeout': 'timed out',
+  'state.mirrorCancelled': 'stopped by you',
   'state.mirrorError': 'failed',
   'state.aiTabOpened': 'AI opened a terminal: {name}',
   'state.aiTabNoSession': 'Session not found or is a local session',

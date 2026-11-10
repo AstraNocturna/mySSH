@@ -23,7 +23,8 @@ export interface ExecEndFrame {
   type: 'exec_end';
   execId: string;
   sessionId: string;
-  status: 'ok' | 'error' | 'timeout';
+  /** cancelled：用户在活动面板停止 */
+  status: 'ok' | 'error' | 'timeout' | 'cancelled';
   exitCode: number | null;
   durationMs: number;
   error: string | null;
@@ -63,7 +64,7 @@ export function formatOutput(f: ExecOutputFrame): string {
 export function formatEnd(
   f: ExecEndFrame,
   atLineStart: boolean,
-  labels: { omitted: (n: number) => string; timeout: string; error: string },
+  labels: { omitted: (n: number) => string; timeout: string; cancelled: string; error: string },
 ): string {
   let s = atLineStart ? '' : '\r\n';
   if (f.omittedBytes > 0) s += `${DIM}${labels.omitted(f.omittedBytes)}${RESET}\r\n`;
@@ -73,6 +74,8 @@ export function formatEnd(
     s += `${ok ? '\x1b[32m✓' : '\x1b[31m✗'} exit ${f.exitCode ?? '?'}${RESET} ${dur}`;
   } else if (f.status === 'timeout') {
     s += `\x1b[33m✗ ${labels.timeout}${RESET} ${dur}`;
+  } else if (f.status === 'cancelled') {
+    s += `\x1b[33m✗ ${labels.cancelled}${RESET} ${dur}`;
   } else {
     s += `\x1b[31m✗ ${labels.error}${f.error ? `：${crlf(f.error)}` : ''}${RESET} ${dur}`;
   }

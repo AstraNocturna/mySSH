@@ -4,6 +4,7 @@ import { MirrorFeed, formatEnd, formatOutput, formatStart, type ExecEndFrame } f
 const labels = {
   omitted: (n: number) => `omitted ${n}`,
   timeout: 'timeout',
+  cancelled: 'stopped',
   error: 'error',
 };
 const end = (p: Partial<ExecEndFrame>): ExecEndFrame => ({
@@ -51,6 +52,9 @@ describe('exec-mirror', () => {
     );
     expect(plain(formatEnd(end({ status: 'timeout', durationMs: 3000 }), true, labels))).toBe(
       '✗ timeout · 3.0 s\r\n\r\n',
+    );
+    expect(plain(formatEnd(end({ status: 'cancelled', exitCode: null }), true, labels))).toBe(
+      '✗ stopped · 12 ms\r\n\r\n',
     );
     expect(
       plain(formatEnd(end({ status: 'error', exitCode: null, error: 'refused' }), true, labels)),

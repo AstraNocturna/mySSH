@@ -316,6 +316,20 @@ pub(crate) async fn job_stop(jobs: &Arc<McpJobs>, args: &Value) -> Result<String
     Ok(job.summary(id).to_string())
 }
 
+impl McpJobs {
+    /// 运行中的后台命令（旧→新），供 AI 活动面板
+    pub(crate) fn running_snapshot(&self) -> Vec<Value> {
+        let map = self.jobs.lock();
+        let mut items: Vec<(u64, Value)> = map
+            .iter()
+            .filter(|(_, j)| j.running())
+            .map(|(id, j)| (j.started_at, j.summary(id)))
+            .collect();
+        items.sort_by_key(|(t, _)| *t);
+        items.into_iter().map(|(_, v)| v).collect()
+    }
+}
+
 pub(crate) fn job_list(jobs: &Arc<McpJobs>, args: &Value) -> String {
     let sid = args.get("session_id").and_then(Value::as_str);
     let map = jobs.jobs.lock();

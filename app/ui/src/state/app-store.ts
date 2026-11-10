@@ -38,6 +38,7 @@ import {
   mirrorFeeds,
   type ExecMirrorFrame,
 } from '../term/exec-mirror';
+import { flashTaskbar, useAiActivity } from './ai-activity';
 
 export type PaneState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error';
 
@@ -132,6 +133,8 @@ type McpUiFrame =
   /** closeTab：terminal_close 时 AI 自己开的标签为 true（前端一并关闭）、共享标签为 false；
    *  MCP 服务停止清场时缺省（只摘标记） */
   | { type: 'agent_terminal_closed'; tabId: string; closeTab?: boolean }
+  /** AI 活动（进行中命令 / 后台命令 / AI 终端）有变化：前端再取 mcp_activity 快照 */
+  | { type: 'ai_activity' }
   | ExecMirrorFrame;
 
 function withoutAiTab(m: Record<string, AiTabKind>, tabId: string): Record<string, AiTabKind> {
@@ -518,6 +521,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         formatEnd(frame, feed.atLineStart, {
           omitted: (n) => tNow('state.mirrorOmitted', { n }),
           timeout: tNow('state.mirrorTimeout'),
+          cancelled: tNow('state.mirrorCancelled'),
           error: tNow('state.mirrorError'),
         }),
       );
@@ -599,6 +603,10 @@ export const useAppStore = create<AppStore>((set, get) => {
               ? s
               : { pendingApprovals: [...s.pendingApprovals, { ...frame, receivedAt: Date.now() }] },
           );
+          useAiActivity.getState().setApprovalHidden(false);
+          flashTaskbar();
+        } else if (frame.type === 'ai_activity') {
+          useAiActivity.getState().refresh();
         } else if (frame.type === 'agent_terminal_open') {
           // 标签窗口只在主窗口开，避免分离窗口重复开
           if (windowLabel !== 'main') return;
@@ -646,6 +654,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         }
       };
       void invoke('mcp_ui_subscribe', { events });
+      useAiActivity.getState().refresh();
     },
 
     answerApproval: (id, allow, always = false) => {

@@ -16,6 +16,7 @@ import { emit, listen } from '@tauri-apps/api/event';
 import { BROADCAST_INPUT_EVENT, initBroadcastReceiver } from '../term/broadcast';
 import { takeAgentRequest, useAppStore } from './app-store';
 import { feedOf } from '../term/exec-mirror';
+import { useAiActivity } from './ai-activity';
 import type { SessionRecord, TermOpenSpec } from '../term/types';
 
 const spec: TermOpenSpec = {
@@ -540,6 +541,23 @@ describe('MCP agent 终端标签', () => {
     expect(takeAgentRequest(tabs[1].activePaneId)).toBe('r1');
     // 只回报一次
     expect(takeAgentRequest(tabs[1].activePaneId)).toBeUndefined();
+  });
+
+  it('新审批请求展开已收起的授权框；ai_activity 提示帧触发取活动快照', async () => {
+    useAiActivity.setState({ approvalHidden: true });
+    push({
+      type: 'approval_request',
+      id: 'ap1',
+      sessionId: 's1',
+      command: 'rm x',
+      expiresInMs: 1000,
+    });
+    expect(useAiActivity.getState().approvalHidden).toBe(false);
+    expect(state().pendingApprovals.map((a) => a.id)).toEqual(['ap1']);
+    vi.mocked(invoke).mockClear();
+    push({ type: 'ai_activity' });
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('mcp_activity'));
+    useAppStore.setState({ pendingApprovals: [] });
   });
 
   it('会话不存在或为本地会话：立即回报失败，不开标签', () => {

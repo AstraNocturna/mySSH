@@ -614,8 +614,20 @@ async fn terminal_read(terms: &Arc<McpTerminalState>, args: &Value) -> Result<St
 /// 用户共享的标签只收回控制、标签留给用户
 async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, String> {
     let id = req_term_id(args, "terminal_close")?;
-    let sess = ctx
-        .terms
+    close_terminal(ctx.terms, ctx.ui, ctx.store, id, core_store::Actor::Mcp)
+        .await
+        .map(|v| v.to_string())
+}
+
+/// 关闭一个 AI 终端（agent 的 terminal_close 与用户在活动面板停止共用）
+pub(crate) async fn close_terminal(
+    terms: &McpTerminalState,
+    ui: &crate::mcp_ui::McpUiHub,
+    store: &Arc<Store>,
+    id: &str,
+    actor: core_store::Actor,
+) -> Result<Value, String> {
+    let sess = terms
         .terms
         .lock()
         .remove(id)
@@ -624,7 +636,7 @@ async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, Strin
     let mut out = json!({ "closed": true });
     if let TermIo::Ui { tab_id, kind, .. } = &sess.io {
         let close_tab = *kind == UiKind::Agent;
-        let sent = ctx.ui.emit(&json!({
+        let sent = ui.emit(&json!({
             "type": "agent_terminal_closed",
             "tabId": tab_id,
             "closeTab": close_tab,
@@ -644,19 +656,42 @@ async fn terminal_close(ctx: &TermCtx<'_>, args: &Value) -> Result<String, Strin
         out["note"] = json!(note);
     }
     if let Some(sid) = &sess.session_id {
-        audit(
-            ctx.store,
-            sid,
-            "mcp_terminal_close",
-            &json!({ "terminalId": id }),
-        )
-        .await;
+        let _ = store
+            .audit()
+            .append(
+                actor,
+                Some(sid),
+                "mcp_terminal_close",
+                &json!({ "terminalId": id }),
+            )
+            .await;
     }
     tracing::info!(terminal_id = %id, "MCP 终端已关闭");
-    Ok(out.to_string())
+    Ok(out)
 }
 
 impl McpTerminalState {
+    /// 未关闭的 AI 终端，供 AI 活动面板（UI 承载的带 tabId，便于前端对应到标签）
+    pub(crate) fn live_snapshot(&self) -> Vec<Value> {
+        self.terms
+            .lock()
+            .iter()
+            .filter(|(_, t)| !t.shared.lock().closed)
+            .map(|(id, t)| {
+                let kind = match &t.io {
+                    TermIo::Headless { .. } => "headless",
+                    TermIo::Ui { kind, .. } => kind.as_str(),
+                };
+                json!({
+                    "terminalId": id,
+                    "sessionId": t.session_id,
+                    "kind": kind,
+                    "tabId": t.ui_tab(),
+                })
+            })
+            .collect()
+    }
+
     /// 会话档案 id → 未关闭的 AI 终端（terminalId + kind），供 list_sessions 展示
     pub(crate) fn live_by_session(&self) -> HashMap<String, Vec<Value>> {
         let mut out: HashMap<String, Vec<Value>> = HashMap::new();

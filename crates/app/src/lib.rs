@@ -230,6 +230,8 @@ pub fn run() {
             mcp::mcp_restart,
             mcp_ui::mcp_ui_subscribe,
             mcp_ui::mcp_approve,
+            mcp_ui::mcp_activity,
+            mcp_ui::mcp_activity_stop,
             mcp_ui::mcp_agent_tab_ready,
             mcp_terminal::mcp_share_tab,
             mcp_terminal::mcp_unshare_tab,

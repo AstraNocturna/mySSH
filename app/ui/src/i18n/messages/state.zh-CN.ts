@@ -127,6 +127,7 @@ export const zhState = {
   'state.aiRevoked': '已收回 AI 控制',
   'state.mirrorOmitted': '…镜像只显示前 512 KiB，省略 {n} 字节（AI 拿到的结果另按规则截断）',
   'state.mirrorTimeout': '超时',
+  'state.mirrorCancelled': '已被你停止',
   'state.mirrorError': '执行失败',
   'state.aiTabOpened': 'AI 打开了终端：{name}',
   'state.aiTabNoSession': '会话不存在或为本地会话',
