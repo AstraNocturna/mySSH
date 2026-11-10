@@ -37,6 +37,8 @@
     "category": "Utility",
     "copyright": "mySSH contributors",
     "icon": ["icons/icon.ico"],
-    "windows": { "nsis": { "installMode": "perMachine" } }
+    "windows": {
+      "nsis": { "installMode": "perMachine", "installerIcon": "icons/icon.ico" }
+    }
   }
 }
