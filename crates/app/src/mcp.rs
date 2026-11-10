@@ -1,7 +1,8 @@
 //! MCP 服务端：让 AI 客户端（Claude Code 等）在已保存的 SSH 会话上执行命令。
 //!
-//! 传输为 MCP Streamable HTTP（2025-03-26 ~ 2025-11-25 子集）：单端点 POST /mcp，
-//! 每次请求独立 JSON 响应（不开 SSE 流）；仅绑定 127.0.0.1。
+//! 传输为 MCP Streamable HTTP（2025-03-26 ~ 2025-11-25 子集）：单端点 /mcp，POST 每次请求
+//! 独立 JSON 响应；GET 开一条只发保活的事件流、DELETE 结束会话，二者只用于判定客户端是否
+//! 还在（断开后自动退出 AI 托管，见 mcp_clients.rs）；仅绑定 127.0.0.1。
 //! 工具面：list_sessions（列会话档案，不含凭据）、ssh_exec（一次性 Bulk
 //! 连接跑命令，收集 stdout/stderr/exit code）、terminal_*（open/send/read/
 //! close 交互式有状态 shell，实现见 mcp_terminal.rs）、sftp_*（home/list/stat/read/
@@ -28,10 +29,14 @@ use std::time::{Duration, Instant};
 use axum::{
     extract::State,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::post,
     Json, Router,
 };
+use futures_util::StreamExt;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -52,6 +57,8 @@ const OUTPUT_CAP: usize = 64 * 1024;
 const DEFAULT_RATE_PER_MINUTE: u32 = 60;
 /// 停止时等待优雅退出的上限，超时后 abort
 const STOP_GRACE: Duration = Duration::from_secs(2);
+/// GET /mcp 事件流保活间隔：连接已断时写保活失败，流随之结束
+const STREAM_KEEPALIVE: Duration = Duration::from_secs(15);
 
 const SESSION_ID_HEADER: HeaderName = HeaderName::from_static("mcp-session-id");
 const PROTOCOL_VERSION_HEADER: HeaderName = HeaderName::from_static("mcp-protocol-version");
@@ -326,6 +333,8 @@ pub struct McpDeps {
     pub jobs: Arc<crate::mcp_jobs::McpJobs>,
     /// 会话录像（AI 终端自动录制）
     pub recs: Arc<crate::recording::RecordingStore>,
+    /// MCP 客户端登记（断开检测与 AI 资源归属）
+    pub clients: Arc<crate::mcp_clients::McpClients>,
 }
 
 /// MCP 服务生命周期管理：持有 tokio task + shutdown watch
@@ -346,6 +355,8 @@ struct McpInner {
     ui: Option<Arc<crate::mcp_ui::McpUiHub>>,
     /// 后台命令注册表（stop 时终止全部运行中的命令）
     jobs: Option<Arc<crate::mcp_jobs::McpJobs>>,
+    /// 客户端登记（stop 时清空）
+    clients: Option<Arc<crate::mcp_clients::McpClients>>,
 }
 
 impl McpManager {
@@ -373,7 +384,9 @@ impl McpManager {
             backups,
             jobs,
             recs,
+            clients,
         } = deps;
+        let (tx, mut rx) = watch::channel(false);
         let state = Arc::new(ServerState {
             store,
             sftp,
@@ -384,6 +397,8 @@ impl McpManager {
             backups,
             jobs: jobs.clone(),
             recs,
+            clients: clients.clone(),
+            shutdown: rx.clone(),
             token: token.clone(),
             perms,
             // 安全模型执行面（M0 只读档）：判定管线 + 每会话速率闸，随服务同生命周期
@@ -391,12 +406,12 @@ impl McpManager {
             rate: RateLimiter::new(rate_per_minute),
         });
         let router = Router::new()
-            .route("/mcp", post(mcp_post))
-            .with_state(state);
+            .route("/mcp", post(mcp_post).get(mcp_get).delete(mcp_delete))
+            .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .map_err(|e| format!("MCP 端口 127.0.0.1:{port} 绑定失败: {e}"))?;
-        let (tx, mut rx) = watch::channel(false);
+        spawn_reaper(state, rx.clone());
         let task = tauri::async_runtime::spawn(async move {
             let result = axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
@@ -423,13 +438,14 @@ impl McpManager {
         inner.terms = Some(terms);
         inner.ui = Some(ui);
         inner.jobs = Some(jobs);
+        inner.clients = Some(clients);
         tracing::info!(port, "MCP 服务已启动（127.0.0.1）");
         Ok(())
     }
 
     /// 停止服务：先发 shutdown 信号走优雅退出，超过 STOP_GRACE 则 abort
     pub async fn stop(&self) {
-        let (tx, task, terms, ui, jobs) = {
+        let (tx, task, terms, ui, jobs, clients) = {
             let mut inner = self.inner.lock();
             inner.port = 0;
             (
@@ -438,8 +454,17 @@ impl McpManager {
                 inner.terms.take(),
                 inner.ui.take(),
                 inner.jobs.take(),
+                inner.clients.take(),
             )
         };
+        // 服务重启后客户端重新登记；等确认的空闲提示一并作废
+        if let Some(clients) = clients {
+            for id in clients.clear() {
+                if let Some(ui) = &ui {
+                    ui.emit(&json!({ "type": "ai_client_idle_closed", "clientId": id }));
+                }
+            }
+        }
         if let Some(jobs) = jobs {
             jobs.stop_all().await;
         }
@@ -530,6 +555,7 @@ pub async fn mcp_restart(
     backups: tauri::State<'_, Arc<crate::mcp_files::BackupStore>>,
     jobs: tauri::State<'_, Arc<crate::mcp_jobs::McpJobs>>,
     recs: tauri::State<'_, Arc<crate::recording::RecordingStore>>,
+    clients: tauri::State<'_, Arc<crate::mcp_clients::McpClients>>,
 ) -> Result<Value, String> {
     let deps = McpDeps {
         store: sessions.store.clone(),
@@ -541,6 +567,7 @@ pub async fn mcp_restart(
         backups: backups.inner().clone(),
         jobs: jobs.inner().clone(),
         recs: recs.inner().clone(),
+        clients: clients.inner().clone(),
     };
     restart_from_settings(&state, deps).await
 }
@@ -562,6 +589,9 @@ struct ServerState {
     /// 后台命令（job_*；命令门同 ssh_exec）
     jobs: Arc<crate::mcp_jobs::McpJobs>,
     recs: Arc<crate::recording::RecordingStore>,
+    clients: Arc<crate::mcp_clients::McpClients>,
+    /// 服务停止信号（事件流据此结束，不拖住优雅退出）
+    shutdown: watch::Receiver<bool>,
     token: String,
     /// 工具分组权限（启动时快照；改设置后 mcp_restart 生效）
     perms: McpPerms,
@@ -577,24 +607,8 @@ async fn mcp_post(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if !st.token.is_empty() {
-        let ok = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .is_some_and(|t| t == st.token);
-        if !ok {
-            tracing::warn!("MCP 请求鉴权失败");
-            return respond(
-                StatusCode::UNAUTHORIZED,
-                Some(rpc_error(
-                    Value::Null,
-                    -32001,
-                    "未授权：需 Authorization: Bearer <token>",
-                )),
-                &headers,
-            );
-        }
+    if !authorized(&st, &headers) {
+        return unauthorized(&headers);
     }
 
     // 2025-06-18 起客户端在 initialize 之后的请求带 MCP-Protocol-Version；不支持的版本按规范回 400
@@ -638,8 +652,25 @@ async fn mcp_post(
         );
     };
 
-    let outcome = dispatch(&st, method, &req).await;
-    match outcome {
+    let client = if method == "initialize" {
+        let name = req
+            .pointer("/params/clientInfo/name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        Some(st.clients.register(name))
+    } else {
+        let id = session_id(&headers);
+        if let Some(id) = &id {
+            if st.clients.touch(id) {
+                st.ui
+                    .emit(&json!({ "type": "ai_client_idle_closed", "clientId": id }));
+            }
+        }
+        id
+    };
+
+    let outcome = crate::mcp_clients::scope(client.clone(), dispatch(&st, method, &req)).await;
+    let mut resp = match outcome {
         Outcome::Accepted => respond(StatusCode::ACCEPTED, None, &headers),
         Outcome::Result(result) => {
             if is_notification {
@@ -659,7 +690,116 @@ async fn mcp_post(
                 respond(StatusCode::OK, Some(rpc_error(id, code, &msg)), &headers)
             }
         }
+    };
+    if method == "initialize" {
+        if let Some(hv) = client.and_then(|c| HeaderValue::from_str(&c).ok()) {
+            resp.headers_mut().insert(&SESSION_ID_HEADER, hv);
+        }
     }
+    resp
+}
+
+fn authorized(st: &ServerState, headers: &HeaderMap) -> bool {
+    if st.token.is_empty() {
+        return true;
+    }
+    let ok = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|t| t == st.token);
+    if !ok {
+        tracing::warn!("MCP 请求鉴权失败");
+    }
+    ok
+}
+
+fn unauthorized(headers: &HeaderMap) -> Response {
+    respond(
+        StatusCode::UNAUTHORIZED,
+        Some(rpc_error(
+            Value::Null,
+            -32001,
+            "未授权：需 Authorization: Bearer <token>",
+        )),
+        headers,
+    )
+}
+
+fn session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(&SESSION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// GET /mcp：服务端事件流。本服务不主动推消息，流只用来感知客户端是否还在——
+/// 连接断开（保活写失败）即视为客户端可能已关闭，交给 mcp_clients 宽限判定。
+async fn mcp_get(State(st): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    if !authorized(&st, &headers) {
+        return unauthorized(&headers);
+    }
+    // 未经 initialize 拿到会话号的客户端不开流（规范允许 405）
+    let Some(id) = session_id(&headers) else {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    };
+    let guard = st.clients.stream_open(&id);
+    let mut shutdown = st.shutdown.clone();
+    let stream = futures_util::stream::once(async move {
+        let _guard = guard;
+        while !*shutdown.borrow() {
+            if shutdown.changed().await.is_err() {
+                break;
+            }
+        }
+        None::<Result<Event, std::convert::Infallible>>
+    })
+    .filter_map(std::future::ready);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(STREAM_KEEPALIVE))
+        .into_response()
+}
+
+/// DELETE /mcp：客户端主动结束会话
+async fn mcp_delete(State(st): State<Arc<ServerState>>, headers: HeaderMap) -> Response {
+    if !authorized(&st, &headers) {
+        return unauthorized(&headers);
+    }
+    match session_id(&headers) {
+        Some(id) => {
+            st.clients.end(&id);
+            StatusCode::OK.into_response()
+        }
+        None => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+/// 定期巡检客户端：断开的退出 AI 托管，空闲到期的请用户确认；服务停止即退出
+fn spawn_reaper(st: Arc<ServerState>, mut shutdown: watch::Receiver<bool>) {
+    tauri::async_runtime::spawn(async move {
+        let mut tick = tokio::time::interval(crate::mcp_clients::REAP_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                r = shutdown.changed() => {
+                    if r.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            let ctx = crate::mcp_clients::ReleaseCtx {
+                clients: &st.clients,
+                ui: &st.ui,
+                terms: &st.terms,
+                jobs: &st.jobs,
+                store: &st.store,
+            };
+            crate::mcp_clients::reap(&ctx, Instant::now()).await;
+        }
+    });
 }
 
 /// 构造响应：JSON 体 + 回显 Mcp-Session-Id（若有）
@@ -1520,7 +1660,11 @@ async fn exec_mirror(
         .map(|r| r.name)
         .unwrap_or_default();
     let tool = action.strip_prefix("mcp_").unwrap_or(action);
-    crate::mcp_ui::ExecMirror::begin(&st.ui, session_id, &name, tool, command)
+    let mirror = crate::mcp_ui::ExecMirror::begin(&st.ui, session_id, &name, tool, command);
+    if mirror.is_some() {
+        st.clients.note_mirror(session_id);
+    }
+    mirror
 }
 
 /// recipe_run：渲染内置模板 → 按风险等级过命令门 → 与 ssh_exec 同一执行通路
@@ -2506,6 +2650,8 @@ mod tests {
                 std::env::temp_dir().join(format!("myssh-mcp-rec-{}", std::process::id())),
                 None,
             ),
+            clients: crate::mcp_clients::McpClients::new(),
+            shutdown: watch::channel(false).1,
             token: String::new(),
             perms: all_perms(),
             policy: PolicyEngine::new(),
@@ -2792,6 +2938,7 @@ mod tests {
                 std::env::temp_dir().join(format!("myssh-mcp-rec-{}", std::process::id())),
                 None,
             ),
+            clients: crate::mcp_clients::McpClients::new(),
         };
         mgr.start(
             deps,
@@ -2861,6 +3008,79 @@ mod tests {
         assert_eq!(resp.status(), 400);
         let tools = rpc(&url, "tools/list", json!({})).await;
         assert_eq!(tools["tools"].as_array().unwrap().len(), 31);
+
+        mgr.stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 客户端登记：initialize 下发会话号，GET 事件流随连接存亡，DELETE 后巡检注销
+    #[tokio::test]
+    async fn e2e_client_session_stream_and_delete() {
+        let dir = std::env::temp_dir().join(format!("myssh-mcp-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir.join("t.db")).await.expect("开库失败"));
+        let (mgr, url) = boot_mcp(store).await;
+        let clients = mgr.inner.lock().clients.clone().unwrap();
+        let http = reqwest::Client::new();
+
+        let resp = http
+            .post(&url)
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "claude-code" } } }))
+            .send()
+            .await
+            .unwrap();
+        let sid = resp.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(sid.len(), 32);
+        assert_eq!(clients.name(&sid), "claude-code");
+
+        // 没有会话号不开流
+        let resp = http.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 405);
+
+        let stream = http
+            .get(&url)
+            .header("Mcp-Session-Id", &sid)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stream.status(), 200);
+        assert!(stream.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"));
+        assert_eq!(clients.streams(&sid), Some(1));
+        drop(stream);
+        let mut closed = false;
+        for _ in 0..200 {
+            if clients.streams(&sid) == Some(0) {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(closed, "客户端断开连接后事件流应结束");
+
+        let resp = http
+            .delete(&url)
+            .header("Mcp-Session-Id", &sid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let mut gone = false;
+        for _ in 0..100 {
+            if clients.streams(&sid).is_none() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(gone, "DELETE 后巡检应注销客户端");
 
         mgr.stop().await;
         let _ = std::fs::remove_dir_all(&dir);

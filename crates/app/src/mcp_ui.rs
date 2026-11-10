@@ -37,6 +37,8 @@ pub(crate) enum ApprovalWait {
 struct Approval {
     session_id: String,
     command: String,
+    /// 发起请求的 MCP 客户端（客户端断开时据此拒绝并关弹窗）
+    owner: Option<String>,
     decision: watch::Sender<Option<bool>>,
     deadline: Instant,
 }
@@ -52,6 +54,7 @@ struct ExecActivity {
     /// unix 毫秒
     started_at: u64,
     cancel: Arc<tokio::sync::Notify>,
+    owner: Option<String>,
 }
 
 #[derive(Default)]
@@ -130,13 +133,14 @@ impl McpUiHub {
         event: Value,
     ) -> Result<String, String> {
         let now = Instant::now();
+        let owner = crate::mcp_clients::current();
         {
             let mut map = self.approvals.lock();
             map.retain(|_, a| a.deadline > now);
-            if let Some((id, _)) = map
-                .iter()
-                .find(|(_, a)| a.session_id == session_id && a.command == command)
-            {
+            // 只复用同一客户端的：别的客户端断开时不连带拒绝
+            if let Some((id, _)) = map.iter().find(|(_, a)| {
+                a.session_id == session_id && a.command == command && a.owner == owner
+            }) {
                 return Ok(id.clone());
             }
         }
@@ -152,6 +156,7 @@ impl McpUiHub {
             Approval {
                 session_id: session_id.to_string(),
                 command: command.to_string(),
+                owner,
                 decision: tx,
                 deadline: now + APPROVAL_TTL,
             },
@@ -267,6 +272,7 @@ impl McpUiHub {
                 command: command.to_string(),
                 started_at,
                 cancel: cancel.clone(),
+                owner: crate::mcp_clients::current(),
             },
         );
         self.activity_changed();
@@ -284,6 +290,60 @@ impl McpUiHub {
         // notify_one 在无人等待时也会留一个许可：select 稍后进入等待也能立刻收到
         a.cancel.notify_one();
         Some(a.session_id.clone())
+    }
+
+    /// 某客户端进行中的命令数
+    pub(crate) fn owned_execs(&self, owner: &str) -> usize {
+        self.execs
+            .lock()
+            .values()
+            .filter(|a| a.owner.as_deref() == Some(owner))
+            .count()
+    }
+
+    /// 客户端断开：停止它进行中的命令；返回停止条数
+    pub(crate) fn cancel_owned_execs(&self, owner: &str) -> usize {
+        let map = self.execs.lock();
+        let mine: Vec<_> = map
+            .values()
+            .filter(|a| a.owner.as_deref() == Some(owner))
+            .collect();
+        for a in &mine {
+            a.cancel.notify_one();
+        }
+        mine.len()
+    }
+
+    /// 某客户端未过期的待确认项数
+    pub(crate) fn owned_approvals(&self, owner: &str) -> usize {
+        let now = Instant::now();
+        self.approvals
+            .lock()
+            .values()
+            .filter(|a| a.deadline > now && a.owner.as_deref() == Some(owner))
+            .count()
+    }
+
+    /// 客户端断开：拒绝并移除它的待确认项，通知前端关掉对应弹窗；返回条数
+    pub(crate) fn drop_owned_approvals(&self, owner: &str) -> usize {
+        let removed: Vec<String> = {
+            let mut map = self.approvals.lock();
+            let ids: Vec<String> = map
+                .iter()
+                .filter(|(_, a)| a.owner.as_deref() == Some(owner))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                if let Some(a) = map.remove(id) {
+                    a.decision.send_replace(Some(false));
+                }
+            }
+            ids
+        };
+        for id in &removed {
+            self.emit(&json!({ "type": "approval_closed", "id": id }));
+        }
+        removed.len()
     }
 
     /// 进行中的 AI 命令（旧→新）

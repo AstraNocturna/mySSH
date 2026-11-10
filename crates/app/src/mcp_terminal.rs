@@ -147,6 +147,8 @@ struct McpTerm {
     session_id: Option<String>,
     /// 输出缓冲（UI 承载时即旁路缓冲本身）
     shared: Arc<Mutex<TermBuf>>,
+    /// 打开它的 MCP 客户端；用户共享的标签为 None
+    owner: Option<String>,
     io: TermIo,
 }
 
@@ -202,6 +204,35 @@ impl McpTerminalState {
         self.terms.lock().get(id).and_then(|s| s.session_id.clone())
     }
 
+    /// 某客户端名下未关闭的终端数
+    pub(crate) fn owned_count(&self, owner: &str) -> usize {
+        self.terms
+            .lock()
+            .values()
+            .filter(|t| t.owner.as_deref() == Some(owner) && !t.shared.lock().closed)
+            .count()
+    }
+
+    /// 关闭某客户端名下的终端（owner=None：用户共享、不属于任何客户端的）；
+    /// UI 承载的只收回控制。返回每个被关终端的 UI 标签（headless 为 None）
+    pub(crate) async fn close_owned(&self, owner: Option<&str>) -> Vec<Option<String>> {
+        let mine: Vec<Arc<McpTerm>> = {
+            let mut map = self.terms.lock();
+            let ids: Vec<String> = map
+                .iter()
+                .filter(|(_, t)| t.owner.as_deref() == owner)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| map.remove(id)).collect()
+        };
+        let mut tabs = Vec::with_capacity(mine.len());
+        for t in mine {
+            t.shutdown().await;
+            tabs.push(t.ui_tab().map(str::to_string));
+        }
+        tabs
+    }
+
     /// 清场：MCP 服务停止/重启时关闭全部终端；返回被收回控制的 UI 标签（供前端摘标记）
     pub async fn close_all(&self) -> Vec<String> {
         let all: Vec<Arc<McpTerm>> = self.terms.lock().drain().map(|(_, s)| s).collect();
@@ -227,6 +258,8 @@ impl McpTerminalState {
         let term = McpTerm {
             session_id,
             shared: tap.out.clone(),
+            // 用户在界面共享标签时不在 MCP 请求作用域内，自然为 None
+            owner: crate::mcp_clients::current(),
             io: TermIo::Ui {
                 tab_id: tab_id.to_string(),
                 tap,
@@ -395,6 +428,7 @@ async fn terminal_open(ctx: &TermCtx<'_>, args: &Value) -> Result<String, String
     let sess = Arc::new(McpTerm {
         session_id: Some(session_id.to_string()),
         shared,
+        owner: crate::mcp_clients::current(),
         io: TermIo::Headless {
             writer,
             task,

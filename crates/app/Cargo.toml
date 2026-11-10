@@ -32,6 +32,7 @@ tracing.workspace = true
 parking_lot.workspace = true
 russh.workspace = true
 axum = "0.8"
+futures-util = "0.3"
 rand = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 base64 = "0.22.1"
