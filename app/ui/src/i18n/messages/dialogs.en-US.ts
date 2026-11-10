@@ -84,10 +84,11 @@ export const enDialogs: Record<keyof typeof zhDialogs, string> = {
   'dialogs.approvalDeny': 'Deny ({sec} s)',
   'dialogs.approvalAllow': 'Allow once',
   'dialogs.approvalAllowNow': 'Run now',
-  'dialogs.approvalAlways': 'Auto-run (this command, this session)',
+  'dialogs.approvalAlways': 'Auto-run (later commands on this session)',
   'dialogs.approvalAutoIn': 'Runs automatically in {sec} s',
+  'dialogs.approvalAutoBlocked': '(high-risk command, confirm manually)',
   'dialogs.approvalAlwaysHint':
-    'When checked it runs after 3 s and is remembered: the same command on this session still shows this dialog, pre-checked with a countdown. Uncheck to forget. Resets when mySSH restarts',
+    'When checked it runs after 3 s; later commands on this session that need approval still show this dialog, pre-checked with a 3 s countdown (high-risk commands excepted). Uncheck to turn it off; it ends when the AI client disconnects',
   'dialogs.approvalPurpose': "AI's own note (unverified; the actual command is what runs)",
   'dialogs.approvalSummary': 'What it does',
   'dialogs.approvalThen': ', then ',

@@ -19,8 +19,8 @@ function firstLine(cmd: string): string {
  * 与 HostKeyDialog 同一防误触规则：默认焦点在「拒绝」、Esc = 拒绝、点遮罩不关闭；
  * 到期（后端 TTL，从请求时刻起算）未决自动按拒绝出队。
  * 多会话并发时左栏按会话分组列出全部待确认项；批量操作只有「拒绝本会话全部」，允许必须逐条。
- * 「自动执行」勾选框：勾上 3 秒后自动批准并记住规则；记住过的命令再来时预勾选并倒计时；
- * 倒计时中取消勾选即停止并忘掉规则。
+ * 「自动执行」勾选框：勾上 3 秒后自动批准，并对本会话开启自动执行——后续弹框预勾选并倒计时
+ *（高危命令除外，AI 客户端断开失效）；倒计时中取消勾选即关掉。
  */
 export function ApprovalDialog() {
   const t = useT();
@@ -211,16 +211,20 @@ export function ApprovalDialog() {
         )}
         <p className="mb-3 text-xs text-neutral-400">{t('dialogs.approvalHint')}</p>
         <label
-          className="mb-3 flex cursor-pointer items-center gap-2 text-xs"
+          className={`mb-3 flex items-center gap-2 text-xs ${
+            current.highRisk ? 'text-neutral-500' : 'cursor-pointer'
+          }`}
           title={t('dialogs.approvalAlwaysHint')}
         >
           <input
             type="checkbox"
             className="accent-amber-500"
             checked={autoOn}
+            disabled={current.highRisk === true}
             onChange={(e) => setAuto(current.id, e.target.checked)}
           />
           <span>{t('dialogs.approvalAlways')}</span>
+          {current.highRisk && <span>{t('dialogs.approvalAutoBlocked')}</span>}
           {autoOn && (
             <span className="rounded bg-amber-700/70 px-1.5 text-amber-50">
               {t('dialogs.approvalAutoIn', {

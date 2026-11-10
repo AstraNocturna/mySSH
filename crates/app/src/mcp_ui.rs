@@ -61,8 +61,8 @@ struct ExecActivity {
 pub struct McpUiHub {
     sink: Mutex<Option<UiSink>>,
     approvals: Mutex<HashMap<String, Approval>>,
-    /// 「总是允许」规则：(会话 id, 完全相同的命令)
-    always: Mutex<HashSet<(String, String)>>,
+    /// 「自动执行」规则：(发起客户端, 会话 id)
+    always: Mutex<HashSet<(Option<String>, String)>>,
     /// agent terminal_open 请前端开标签：requestId → 结果回传
     tab_waiters: Mutex<HashMap<String, oneshot::Sender<TabResult>>>,
     /// 进行中的 AI 一次性命令：execId → 登记
@@ -368,12 +368,13 @@ impl McpUiHub {
         items.into_iter().map(|(_, v)| v).collect()
     }
 
-    /// 批准并记下「总是允许」规则；未知/已过期审批项返回 false 且不记规则
+    /// 批准并为（发起客户端, 会话）开启「自动执行」：该客户端在此会话后续需确认的命令
+    /// 弹框后自动勾选并倒计时批准（高危命令除外），至客户端断开。未知/已过期审批项返回 false 且不记规则
     pub(crate) fn allow_always(&self, id: &str) -> bool {
         let key = {
             let map = self.approvals.lock();
             match map.get(id) {
-                Some(a) if a.deadline > Instant::now() => (a.session_id.clone(), a.command.clone()),
+                Some(a) if a.deadline > Instant::now() => (a.owner.clone(), a.session_id.clone()),
                 _ => return false,
             }
         };
@@ -381,22 +382,28 @@ impl McpUiHub {
         self.decide(id, true)
     }
 
-    /// 忘掉该审批项对应的「自动执行」规则（用户取消勾选或拒绝）
+    /// 关掉该审批项所属（客户端, 会话）的「自动执行」（用户取消勾选或拒绝）
     pub(crate) fn forget_always(&self, id: &str) {
         let key = match self.approvals.lock().get(id) {
-            Some(a) => (a.session_id.clone(), a.command.clone()),
+            Some(a) => (a.owner.clone(), a.session_id.clone()),
             None => return,
         };
         self.always.lock().remove(&key);
     }
 
-    /// 同会话同命令是否已被用户「总是允许」
-    pub(crate) fn is_always_allowed(&self, session_id: &str, command: &str) -> bool {
+    /// 当前请求的客户端是否已在该会话开启「自动执行」
+    pub(crate) fn is_auto_run(&self, session_id: &str) -> bool {
         self.always
             .lock()
-            .contains(&(session_id.to_string(), command.to_string()))
+            .contains(&(crate::mcp_clients::current(), session_id.to_string()))
     }
 
+    /// 客户端断开（退出 AI 托管）：它开启的「自动执行」全部失效
+    pub(crate) fn forget_owner_rules(&self, owner: &str) {
+        self.always
+            .lock()
+            .retain(|(o, _)| o.as_deref() != Some(owner));
+    }
     /// 用户决定；未知/已过期审批项返回 false
     pub(crate) fn decide(&self, id: &str, allow: bool) -> bool {
         let map = self.approvals.lock();
@@ -525,8 +532,8 @@ pub async fn mcp_ui_subscribe(
     Ok(())
 }
 
-/// 用户对审批项的决定。always = 「自动执行」勾选框的状态：批准且勾选 → 记下规则
-///（本会话此命令以后弹框后自动倒计时批准，至应用重启）；未勾选或拒绝 → 忘掉规则
+/// 用户对审批项的决定。always = 「自动执行」勾选框的状态：批准且勾选 → 该客户端在此会话
+/// 开启自动执行（后续弹框自动勾选并倒计时批准，高危命令除外，至客户端断开）；未勾选或拒绝 → 关掉
 #[tauri::command]
 pub async fn mcp_approve(
     hub: tauri::State<'_, Arc<McpUiHub>>,
@@ -772,25 +779,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allow_always_records_exact_command_per_session() {
+    async fn auto_run_is_per_client_and_session() {
         let (hub, _) = hub_with_sink();
-        let id = hub
-            .request("s", "systemctl restart nginx", json!({}))
-            .unwrap();
-        assert!(!hub.is_always_allowed("s", "systemctl restart nginx"));
+        let id = crate::mcp_clients::scope(Some("c1".into()), async {
+            hub.request("s", "systemctl restart nginx", json!({}))
+                .unwrap()
+        })
+        .await;
+        let auto = |client: &str, sid: &str| {
+            let (hub, sid) = (hub.clone(), sid.to_string());
+            crate::mcp_clients::scope(Some(client.into()), async move { hub.is_auto_run(&sid) })
+        };
+        assert!(!auto("c1", "s").await);
         assert!(hub.allow_always(&id));
         assert_eq!(
             hub.wait(&id, Duration::from_millis(10)).await,
             ApprovalWait::Approved
         );
-        assert!(hub.is_always_allowed("s", "systemctl restart nginx"));
-        // 只认同会话 + 完全相同的命令
-        assert!(!hub.is_always_allowed("other", "systemctl restart nginx"));
-        assert!(!hub.is_always_allowed("s", "systemctl restart nginx "));
-        assert!(!hub.is_always_allowed("s", "systemctl restart mysql"));
+        // 同客户端同会话的任意后续命令都自动执行；别的会话、别的客户端不受影响
+        assert!(auto("c1", "s").await);
+        assert!(!auto("c1", "other").await);
+        assert!(!auto("c2", "s").await);
         // 已消费/未知审批项不能借机记规则
         assert!(!hub.allow_always(&id));
         assert!(!hub.allow_always("nope"));
+        // 客户端断开即失效
+        hub.forget_owner_rules("c2");
+        assert!(auto("c1", "s").await);
+        hub.forget_owner_rules("c1");
+        assert!(!auto("c1", "s").await);
     }
 
     #[tokio::test]
@@ -802,10 +819,10 @@ mod tests {
             hub.wait(&first, Duration::from_millis(10)).await,
             ApprovalWait::Approved
         );
-        let again = hub.request("s", "df -h", json!({})).unwrap();
-        assert!(hub.is_always_allowed("s", "df -h"));
+        let again = hub.request("s", "uptime", json!({})).unwrap();
+        assert!(hub.is_auto_run("s"));
         hub.forget_always(&again);
-        assert!(!hub.is_always_allowed("s", "df -h"));
+        assert!(!hub.is_auto_run("s"));
         // 忘规则不等于决定：审批项仍在等用户
         assert!(matches!(
             hub.wait(&again, Duration::from_millis(10)).await,
@@ -814,7 +831,6 @@ mod tests {
         assert!(hub.decide(&again, false));
         hub.forget_always("nope");
     }
-
     #[tokio::test]
     async fn exec_ticket_registers_cancels_and_unregisters_on_drop() {
         let (hub, seen) = hub_with_sink();
