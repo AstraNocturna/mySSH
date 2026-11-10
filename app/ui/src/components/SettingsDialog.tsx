@@ -3,7 +3,7 @@ import { useAppStore } from '../state/app-store';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { BUILTIN_THEMES, SYSTEM_DEFAULTS } from '../term/themes';
+import { BUILTIN_THEMES, DEFAULT_THEME_ID, SYSTEM_DEFAULTS } from '../term/themes';
 import { KEY_ACTIONS, keymapFromSettings, type KeymapScheme } from '../term/keymap';
 import { readTermBackground, readTerminalSettings } from '../state/apply-settings';
 import { Dialog } from './Dialog';
@@ -11,9 +11,11 @@ import { ThemeStudio } from './ThemeStudio';
 import { MCP_LEVELS } from './mcp-options';
 import { RETENTION, RETENTION_MAX_DAYS, readRetentionDays } from './ai-backup-format';
 import { useT, type MsgKey } from '../i18n';
+import { Icon, type IconName } from './Icon';
+import { PolicySettings } from './PolicySettings';
 
 const inputCls =
-  'rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-xs text-neutral-200 outline-none focus:border-blue-500 focus-visible:ring-1 focus-visible:ring-neutral-500';
+  'h-7 rounded-md border border-neutral-700 bg-neutral-800 px-2 text-xs text-neutral-200 outline-none';
 
 /** 终端字体候选（等宽）；document.fonts.check 探测系统已装，探测失败则全量列出 */
 const FONT_CANDIDATES = [
@@ -115,13 +117,14 @@ function mcpConfigOpencode(port: number, token: string): string {
 }
 
 /** 左导航页签 */
-type NavTab = 'general' | 'terminal' | 'appearance' | 'mcp' | 'shortcuts';
-const NAV_TABS: [NavTab, MsgKey][] = [
-  ['general', 'dialogs.navGeneral'],
-  ['terminal', 'dialogs.navTerminal'],
-  ['appearance', 'dialogs.navAppearance'],
-  ['mcp', 'dialogs.navMcp'],
-  ['shortcuts', 'dialogs.navShortcuts'],
+type NavTab = 'general' | 'terminal' | 'appearance' | 'mcp' | 'policy' | 'shortcuts';
+const NAV_TABS: [NavTab, MsgKey, IconName][] = [
+  ['general', 'dialogs.navGeneral', 'sliders'],
+  ['terminal', 'dialogs.navTerminal', 'terminal'],
+  ['appearance', 'dialogs.navAppearance', 'palette'],
+  ['mcp', 'dialogs.navMcp', 'plug'],
+  ['policy', 'dialogs.navPolicy', 'shield'],
+  ['shortcuts', 'dialogs.navShortcuts', 'keyboard'],
 ];
 
 /** 单张主题卡：迷你终端预览 + 名称 + 明暗徽章；点击即切换 */
@@ -143,15 +146,15 @@ function ThemeCard({
   const t = useT();
   return (
     <button
-      className={`rounded border border-neutral-700 p-1.5 text-left transition hover:bg-neutral-800/60 ${
-        selected ? 'ring-2 ring-blue-500' : ''
+      className={`rounded-lg border p-1.5 text-left hover:bg-neutral-800/60 ${
+        selected ? 'border-blue-500 ring-2 ring-blue-500/40' : 'border-neutral-700'
       }`}
       aria-pressed={selected}
       onClick={() => onPick(id)}
     >
-      <div className="mb-1 h-14 overflow-hidden rounded">{preview}</div>
+      <div className="mb-1.5 h-14 overflow-hidden rounded-md">{preview}</div>
       <div className="flex items-center justify-between px-0.5">
-        <span className="text-neutral-200">{label}</span>
+        <span className="truncate text-neutral-200">{label}</span>
         {ui && (
           <span className="rounded bg-neutral-800 px-1 text-[10px] text-neutral-400">
             {ui === 'dark' ? t('dialogs.themeDarkBadge') : t('dialogs.themeLightBadge')}
@@ -188,7 +191,7 @@ export function SettingsDialog() {
   /** 诊断包时间范围（'1h'|'24h'|'7d'|'all'），默认 24h——全量导出随日志积累越来越大 */
   const [diagRange, setDiagRange] = useState('24h');
 
-  const theme = typeof settings['theme'] === 'string' ? settings['theme'] : 'one-dark';
+  const theme = typeof settings['theme'] === 'string' ? settings['theme'] : DEFAULT_THEME_ID;
   const lang = settings['ui.language'] === 'en-US' ? 'en-US' : 'zh-CN';
   const term = readTerminalSettings(settings);
   const termBg = readTermBackground(settings);
@@ -242,39 +245,41 @@ export function SettingsDialog() {
     <Dialog
       title={t('dialogs.settingsTitle')}
       onClose={toggleSettings}
-      panelClass="flex max-h-[80vh] w-[720px] flex-col overscroll-contain rounded-lg border border-neutral-700 bg-neutral-900 text-xs text-neutral-300 shadow-xl"
+      panelClass="flex h-[640px] max-h-[85vh] w-[820px] max-w-[94vw] flex-col overscroll-contain overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 text-xs text-neutral-300 shadow-xl"
     >
-      <div className="flex items-center justify-between border-b border-neutral-800 p-4 pb-3">
+      <div className="flex items-center justify-between border-b border-neutral-800 py-3 pr-3 pl-5">
         <h2 className="text-sm font-semibold text-neutral-100">{t('dialogs.settingsTitle')}</h2>
         <button
-          className="rounded px-1 text-neutral-500 hover:text-neutral-200"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
           onClick={toggleSettings}
           aria-label={t('dialogs.closeSettings')}
         >
-          ✕
+          <Icon name="x" size={15} />
         </button>
       </div>
 
       <div className="flex min-h-0 flex-1">
         {/* 左导航 */}
-        <nav className="w-36 shrink-0 border-r border-neutral-800 p-2">
-          {NAV_TABS.map(([id, labelKey]) => (
+        <nav className="flex w-44 shrink-0 flex-col gap-0.5 border-r border-neutral-800 bg-neutral-950/40 p-2">
+          {NAV_TABS.map(([id, labelKey, icon]) => (
             <button
               key={id}
-              className={`mb-0.5 block w-full rounded-r border-l-2 px-2 py-1.5 text-left ${
+              className={`flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] ${
                 tab === id
-                  ? 'border-blue-500 bg-neutral-800 text-neutral-100'
-                  : 'border-transparent text-neutral-400 hover:bg-neutral-800/50'
+                  ? 'bg-blue-600/15 text-blue-300'
+                  : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
               }`}
+              aria-current={tab === id ? 'page' : undefined}
               onClick={() => setTab(id)}
             >
+              <Icon name={icon} size={15} />
               {t(labelKey)}
             </button>
           ))}
         </nav>
 
         {/* 右内容区 */}
-        <div className="min-w-0 flex-1 overflow-y-auto p-4">
+        <div className="flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-5 [&>section]:mb-0">
           {tab === 'general' && (
             <>
               <section className="mb-4">
@@ -536,7 +541,7 @@ export function SettingsDialog() {
             <>
               <section className="mb-4">
                 <h3 className="mb-1.5 font-semibold text-neutral-200">{t('dialogs.theme')}</h3>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-4 gap-2">
                   <ThemeCard
                     id="system"
                     label={t('dialogs.themeCardSystem')}
@@ -788,6 +793,8 @@ export function SettingsDialog() {
               <p className="mt-1.5 text-neutral-600">{t('dialogs.mcpHint')}</p>
             </section>
           )}
+
+          {tab === 'policy' && <PolicySettings />}
 
           {tab === 'shortcuts' && (
             <section>

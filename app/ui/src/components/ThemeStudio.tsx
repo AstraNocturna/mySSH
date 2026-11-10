@@ -35,14 +35,14 @@ interface Draft extends ITheme {
   ui?: 'dark' | 'light';
 }
 
-/** 兜底调色板：草稿缺色/坏 JSON 时按 one-dark 显示 */
+/** 兜底调色板：草稿缺色/坏 JSON 时按默认主题显示 */
 const SEED: Draft = { ui: 'dark', ...BUILTIN_THEMES[0].xterm };
 
 function parseDraft(json: string): Draft {
   try {
     return JSON.parse(json) as Draft;
   } catch {
-    return SEED; // 坏 JSON：以 one-dark 为底
+    return SEED; // 坏 JSON：以默认主题为底
   }
 }
 
@@ -55,7 +55,7 @@ function pick(draft: Draft, key: BasicKey | AnsiKey): string {
 /**
  * 自定义主题图形化编辑器（theme === 'custom' 时替代原 JSON textarea）。
  * 单一事实源在 settings KV：每次修改即整体 stringify 写回 theme.customJson；
- * 坏 JSON 下首次修改会把 one-dark 种子全量铺入，产出恒为合法 ITheme JSON。
+ * 坏 JSON 下首次修改会把默认主题种子全量铺入，产出恒为合法 ITheme JSON。
  */
 export function ThemeStudio() {
   const settings = useAppStore((s) => s.settings);

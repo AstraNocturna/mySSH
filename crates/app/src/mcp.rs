@@ -401,8 +401,7 @@ impl McpManager {
             shutdown: rx.clone(),
             token: token.clone(),
             perms,
-            // 安全模型执行面（M0 只读档）：判定管线 + 每会话速率闸，随服务同生命周期
-            policy: PolicyEngine::new(),
+            // 每会话速率闸，随服务同生命周期（命令分类器每次调用按设置现建）
             rate: RateLimiter::new(rate_per_minute),
         });
         let router = Router::new()
@@ -595,8 +594,6 @@ struct ServerState {
     token: String,
     /// 工具分组权限（启动时快照；改设置后 mcp_restart 生效）
     perms: McpPerms,
-    /// 命令分类器（安全模型第 1/2 条；M0 用内置白/黑名单，用户编辑版 M6 接入）
-    policy: PolicyEngine,
     /// 每会话每分钟命令数上限（安全模型第 6 条）
     rate: RateLimiter,
 }
@@ -1740,9 +1737,11 @@ async fn exec_gate(
     let rec = st.store.sessions().get(session_id).await.ok();
     let eff = session_effective(st, rec.as_ref()).await;
     let level = crate::mcp_policy::level_str(eff.level);
+    // 判定与审批展示用同一份名单
+    let policy = crate::mcp_policy::load_policy_engine(&st.store).await;
     let verdict = match recipe_risk {
         Some(risk) => crate::mcp_recipes::verdict(risk, eff.level, eff.production),
-        None => st.policy.classify(command, eff.level, eff.production),
+        None => policy.classify(command, eff.level, eff.production),
     };
     let deny_reason = match verdict {
         Verdict::Allow => None,
@@ -1753,6 +1752,7 @@ async fn exec_gate(
                 eff: &eff,
                 action: &action,
                 purpose,
+                policy: &policy,
             };
             match confirm_exec(st, session_id, command, ask).await {
                 Confirm::Approved => None,
@@ -1870,6 +1870,7 @@ struct Ask<'a> {
     eff: &'a crate::mcp_policy::Effective,
     action: &'a str,
     purpose: Option<&'a str>,
+    policy: &'a PolicyEngine,
 }
 
 /// 需人工确认的命令：推审批弹窗（附逐段风险分析与 agent 自述用途）并等待用户决定
@@ -1879,12 +1880,13 @@ async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: As
         eff,
         action,
         purpose,
+        policy,
     } = ask;
     // 会话不存在不弹窗：用户无从判断，且后续解析必然失败
     let Some(rec) = rec else {
         return Confirm::Denied("命令需人工确认，且会话不存在".into());
     };
-    let explained = st.policy.explain(command);
+    let explained = policy.explain(command);
     // 高危命令即使会话开了「自动执行」也要手动确认
     let high_risk = explained.iter().any(|p| {
         p.risk == PartRisk::Blacklist || p.cmds.iter().any(|c| c.risk == PartRisk::Blacklist)
@@ -2655,7 +2657,6 @@ mod tests {
             shutdown: watch::channel(false).1,
             token: String::new(),
             perms: all_perms(),
-            policy: PolicyEngine::new(),
             rate: RateLimiter::new(DEFAULT_RATE_PER_MINUTE),
         }
     }
@@ -2812,6 +2813,56 @@ mod tests {
                 assert!(e.contains("用户拒绝"), "{e}");
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 运行时改 policy.blacklist：下一次 ssh_exec 立即按新名单判定，不重建服务状态
+    #[tokio::test]
+    async fn ssh_exec_reads_policy_lists_per_call() {
+        let dir = std::env::temp_dir().join(format!("myssh-mcp-lists-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Store::open(&dir.join("t.db")).await.expect("开库失败"));
+        let rec: core_store::SessionRecord = serde_json::from_value(json!({
+            "id": "s1", "name": "s1", "host": "127.0.0.1", "port": 1, "username": "u",
+            "authType": "password", "groupPath": "", "tags": [], "mcpLevel": "full",
+            "createdAt": "", "updatedAt": ""
+        }))
+        .unwrap();
+        store.sessions().upsert(&rec).await.unwrap();
+        let st = test_state(store.clone(), crate::mcp_ui::McpUiHub::new());
+        let args = json!({ "session_id": "s1", "command": "kill 1", "timeout_ms": 3000 });
+
+        // 内置名单：full 档普通写操作放行，进入建连（端口 1 必然失败）
+        let e = ssh_exec_tool(&st, &args).await.unwrap_err();
+        assert!(!e.contains("安全策略"), "{e}");
+
+        // 加入黑名单：需确认，无前端订阅 → fail-closed
+        let set = async |raw: &str| {
+            store
+                .settings()
+                .set(crate::mcp_policy::BLACKLIST_KEY, raw)
+                .await
+                .unwrap()
+        };
+        set(r#"["rm","kill"]"#).await;
+        let e = ssh_exec_tool(&st, &args).await.unwrap_err();
+        assert!(e.contains("审批通道不可用"), "{e}");
+
+        // JSON 字符串包数组同样生效；空数组 = 黑名单为空，rm 在 full 档放行
+        set(&serde_json::to_string(r#"[]"#).unwrap()).await;
+        let mut rm = args.clone();
+        rm["command"] = json!("rm /tmp/x");
+        let e = ssh_exec_tool(&st, &rm).await.unwrap_err();
+        assert!(!e.contains("安全策略"), "{e}");
+
+        // 删除设置 → 回落内置黑名单
+        store
+            .settings()
+            .delete(crate::mcp_policy::BLACKLIST_KEY)
+            .await
+            .unwrap();
+        let e = ssh_exec_tool(&st, &rm).await.unwrap_err();
+        assert!(e.contains("审批通道不可用"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -44,7 +44,7 @@ export function StatusBar() {
 
   return (
     <footer
-      className="flex items-center gap-3 border-t border-neutral-800 px-3 py-0.5 text-xs text-neutral-500"
+      className="flex h-6 shrink-0 items-center gap-4 border-t border-neutral-800 bg-neutral-900 px-3 text-[11px] text-neutral-500"
       role="status"
       aria-label={t('chrome.statusBarLabel')}
     >

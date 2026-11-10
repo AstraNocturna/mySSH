@@ -100,7 +100,7 @@ export function Dialog({
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/60 ${backdropClass ?? ''}`}
+      className={`myssh-backdrop fixed inset-0 z-50 flex items-center justify-center ${backdropClass ?? ''}`}
       onClick={closeOnBackdrop ? onClose : undefined}
     >
       <div
@@ -109,7 +109,7 @@ export function Dialog({
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className={`overscroll-contain ${panelClass ?? ''}`}
+        className={`myssh-dialog-pop overscroll-contain ${panelClass ?? ''}`}
         onClick={(e) => e.stopPropagation()}
       >
         {children}

@@ -4,7 +4,7 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { Terminal } from '@xterm/xterm';
 import { useAppStore } from '../state/app-store';
 import { readTerminalSettings } from '../state/apply-settings';
-import { resolveTheme } from '../term/themes';
+import { DEFAULT_THEME_ID, resolveTheme } from '../term/themes';
 import {
   framesUntil,
   parseCast,
@@ -287,7 +287,7 @@ function CastPlayer({ cast, onBack }: { cast: Cast; onBack: () => void }) {
       scrollback: 5000,
       disableStdin: true,
       theme: resolveTheme(
-        typeof settings['theme'] === 'string' ? settings['theme'] : 'one-dark',
+        typeof settings['theme'] === 'string' ? settings['theme'] : DEFAULT_THEME_ID,
         typeof settings['theme.customJson'] === 'string' ? settings['theme.customJson'] : undefined,
       ).xterm,
     });

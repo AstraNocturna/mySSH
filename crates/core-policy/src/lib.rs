@@ -22,6 +22,9 @@ mod error;
 mod rate;
 
 pub use budget::{Budget, BudgetExhausted, BudgetSnapshot, Permit};
-pub use classifier::{AccessLevel, CommandPart, PartRisk, PolicyEngine, Verdict};
+pub use classifier::{
+    builtin_lists, AccessLevel, BuiltinLists, CommandPart, PartRisk, PolicyEngine, PolicyLists,
+    Verdict,
+};
 pub use error::PolicyError;
 pub use rate::{CallerId, RateLimiter};

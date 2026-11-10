@@ -1,4 +1,4 @@
-//! 主题系统（M5）：内置 One Dark / Solarized / Nord 深浅色 + 自定义 JSON。
+//! 主题系统（M5）：内置 mySSH 深空/晨雾、Tokyo Night、Catppuccin、One Dark 等深浅色 + 自定义 JSON。
 //! 主题 = xterm 调色板 + UI 明暗档 + chrome 派生色（deriveChromeVars 由调色板算出
 //! 界面背景/文字/强调色刻度，经根节点 CSS 变量换肤；index.css 消费 --myssh-chrome-*）。
 //! 跟随系统：settings theme.followSystem=true 时按 prefers-color-scheme 在深浅默认间切换。
@@ -11,10 +11,206 @@ export interface ThemeDef {
   label: string;
   /** UI 明暗档（chrome 换肤依据） */
   ui: 'dark' | 'light';
+  /** 界面强调色（按钮/激活态）；缺省取调色板 blue */
+  accent?: string;
   xterm: ITheme;
 }
 
 export const BUILTIN_THEMES: ThemeDef[] = [
+  {
+    id: 'myssh-dark',
+    label: 'mySSH 深空',
+    ui: 'dark',
+    accent: '#5b8cff',
+    xterm: {
+      background: '#16181d',
+      foreground: '#cdd3de',
+      cursor: '#7aa2ff',
+      selectionBackground: '#2c3646',
+      black: '#23262d',
+      red: '#f2706f',
+      green: '#8fd17f',
+      yellow: '#e5c07b',
+      blue: '#6e9dff',
+      magenta: '#c68cf2',
+      cyan: '#5fd3e0',
+      white: '#d6dae2',
+      brightBlack: '#5a6070',
+      brightRed: '#ff8a88',
+      brightGreen: '#a6e394',
+      brightYellow: '#f0d08f',
+      brightBlue: '#8fb4ff',
+      brightMagenta: '#d7a6ff',
+      brightCyan: '#84e2ec',
+      brightWhite: '#ffffff',
+    },
+  },
+  {
+    id: 'myssh-light',
+    label: 'mySSH 晨雾',
+    ui: 'light',
+    accent: '#3b6cf6',
+    xterm: {
+      background: '#f7f8fa',
+      foreground: '#2b303b',
+      cursor: '#3b6cf6',
+      selectionBackground: '#cfdcfb',
+      black: '#3b4048',
+      red: '#d1383d',
+      green: '#2e8a43',
+      yellow: '#a86b00',
+      blue: '#3b6cf6',
+      magenta: '#9c4dd6',
+      cyan: '#11809a',
+      white: '#a0a7b4',
+      brightBlack: '#6b7280',
+      brightRed: '#e5484d',
+      brightGreen: '#30a14e',
+      brightYellow: '#c27c00',
+      brightBlue: '#5b84ff',
+      brightMagenta: '#b062e8',
+      brightCyan: '#1596b3',
+      brightWhite: '#d5d9e0',
+    },
+  },
+  {
+    id: 'tokyo-night',
+    label: 'Tokyo Night',
+    ui: 'dark',
+    xterm: {
+      background: '#1a1b26',
+      foreground: '#c0caf5',
+      cursor: '#c0caf5',
+      selectionBackground: '#283457',
+      black: '#15161e',
+      red: '#f7768e',
+      green: '#9ece6a',
+      yellow: '#e0af68',
+      blue: '#7aa2f7',
+      magenta: '#bb9af7',
+      cyan: '#7dcfff',
+      white: '#a9b1d6',
+      brightBlack: '#414868',
+      brightRed: '#f7768e',
+      brightGreen: '#9ece6a',
+      brightYellow: '#e0af68',
+      brightBlue: '#7aa2f7',
+      brightMagenta: '#bb9af7',
+      brightCyan: '#7dcfff',
+      brightWhite: '#c0caf5',
+    },
+  },
+  {
+    id: 'catppuccin-mocha',
+    label: 'Catppuccin Mocha',
+    ui: 'dark',
+    accent: '#cba6f7',
+    xterm: {
+      background: '#1e1e2e',
+      foreground: '#cdd6f4',
+      cursor: '#f5e0dc',
+      selectionBackground: '#45475a',
+      black: '#45475a',
+      red: '#f38ba8',
+      green: '#a6e3a1',
+      yellow: '#f9e2af',
+      blue: '#89b4fa',
+      magenta: '#f5c2e7',
+      cyan: '#94e2d5',
+      white: '#bac2de',
+      brightBlack: '#585b70',
+      brightRed: '#f38ba8',
+      brightGreen: '#a6e3a1',
+      brightYellow: '#f9e2af',
+      brightBlue: '#89b4fa',
+      brightMagenta: '#f5c2e7',
+      brightCyan: '#94e2d5',
+      brightWhite: '#a6adc8',
+    },
+  },
+  {
+    id: 'dracula',
+    label: 'Dracula',
+    ui: 'dark',
+    xterm: {
+      background: '#282a36',
+      foreground: '#f8f8f2',
+      cursor: '#f8f8f2',
+      selectionBackground: '#44475a',
+      black: '#21222c',
+      red: '#ff5555',
+      green: '#50fa7b',
+      yellow: '#f1fa8c',
+      blue: '#bd93f9',
+      magenta: '#ff79c6',
+      cyan: '#8be9fd',
+      white: '#f8f8f2',
+      brightBlack: '#6272a4',
+      brightRed: '#ff6e6e',
+      brightGreen: '#69ff94',
+      brightYellow: '#ffffa5',
+      brightBlue: '#d6acff',
+      brightMagenta: '#ff92df',
+      brightCyan: '#a4ffff',
+      brightWhite: '#ffffff',
+    },
+  },
+  {
+    id: 'github-dark',
+    label: 'GitHub Dark',
+    ui: 'dark',
+    accent: '#2f81f7',
+    xterm: {
+      background: '#0d1117',
+      foreground: '#e6edf3',
+      cursor: '#2f81f7',
+      selectionBackground: '#264f78',
+      black: '#484f58',
+      red: '#ff7b72',
+      green: '#3fb950',
+      yellow: '#d29922',
+      blue: '#58a6ff',
+      magenta: '#bc8cff',
+      cyan: '#39c5cf',
+      white: '#b1bac4',
+      brightBlack: '#6e7681',
+      brightRed: '#ffa198',
+      brightGreen: '#56d364',
+      brightYellow: '#e3b341',
+      brightBlue: '#79c0ff',
+      brightMagenta: '#d2a8ff',
+      brightCyan: '#56d4dd',
+      brightWhite: '#ffffff',
+    },
+  },
+  {
+    id: 'catppuccin-latte',
+    label: 'Catppuccin Latte',
+    ui: 'light',
+    accent: '#8839ef',
+    xterm: {
+      background: '#eff1f5',
+      foreground: '#4c4f69',
+      cursor: '#dc8a78',
+      selectionBackground: '#ccd0da',
+      black: '#5c5f77',
+      red: '#d20f39',
+      green: '#40a02b',
+      yellow: '#df8e1d',
+      blue: '#1e66f5',
+      magenta: '#ea76cb',
+      cyan: '#179299',
+      white: '#acb0be',
+      brightBlack: '#6c6f85',
+      brightRed: '#d20f39',
+      brightGreen: '#40a02b',
+      brightYellow: '#df8e1d',
+      brightBlue: '#1e66f5',
+      brightMagenta: '#ea76cb',
+      brightCyan: '#179299',
+      brightWhite: '#bcc0cc',
+    },
+  },
   {
     id: 'one-dark',
     label: 'One Dark',
@@ -233,8 +429,11 @@ export const BUILTIN_THEMES: ThemeDef[] = [
   },
 ];
 
+/** 未设置主题时的默认主题 */
+export const DEFAULT_THEME_ID = 'myssh-dark';
+
 /** 系统明暗对应的默认主题 */
-export const SYSTEM_DEFAULTS = { dark: 'one-dark', light: 'solarized-light' } as const;
+export const SYSTEM_DEFAULTS = { dark: 'myssh-dark', light: 'myssh-light' } as const;
 
 export interface ThemeSettings {
   /** 'system' | 主题 id | 'custom' */
@@ -242,7 +441,7 @@ export interface ThemeSettings {
   customJson?: string; // theme.custom：xterm ITheme JSON + ui 字段
 }
 
-/** 解析生效主题：system → 按媒体查询；custom → 解析 JSON（坏则回退 one-dark） */
+/** 解析生效主题：system → 按媒体查询；custom → 解析 JSON（坏则回退默认主题） */
 export function resolveTheme(theme: string, customJson?: string): ThemeDef {
   let id = theme;
   if (id === 'system') {
@@ -298,18 +497,19 @@ function mixHex(a: string, b: string, t: number): string {
 export function deriveChromeVars(def: ThemeDef): Record<string, string> {
   const bg = normHex(def.xterm.background) ?? (def.ui === 'light' ? '#ffffff' : '#000000');
   const fg = normHex(def.xterm.foreground) ?? (def.ui === 'light' ? '#000000' : '#ffffff');
-  const accent = normHex(def.xterm.blue) ?? '#3b82f6';
+  const accent = normHex(def.accent) ?? normHex(def.xterm.blue) ?? '#3b82f6';
   const dark = def.ui === 'dark';
-  // 暗色：chrome 比终端更暗（终端是视觉焦点）；亮色：panel 比底色更亮（近白）。
+  // 暗色分层（Termius/Tabby 风）：窗口底 < 侧栏/标签栏 < 终端底 < 卡片/hover < 选中；
+  // 亮色：panel 比底色更亮（近白）。
   const toward = dark ? '#000000' : '#ffffff';
   const away = dark ? '#ffffff' : '#000000';
   return {
-    '--myssh-chrome-body': mixHex(bg, toward, dark ? 0.55 : 0.05),
-    '--myssh-chrome-panel': mixHex(bg, toward, dark ? 0.4 : 0.5),
-    '--myssh-chrome-panel-2': mixHex(bg, toward, dark ? 0.2 : 0.08),
-    '--myssh-chrome-deep': mixHex(bg, toward, dark ? 0.7 : 0.1),
-    '--myssh-chrome-raised': mixHex(bg, away, dark ? 0.1 : 0.14),
-    '--myssh-chrome-border': mixHex(bg, away, dark ? 0.14 : 0.14),
+    '--myssh-chrome-body': mixHex(bg, toward, dark ? 0.32 : 0.05),
+    '--myssh-chrome-panel': mixHex(bg, toward, dark ? 0.18 : 0.5),
+    '--myssh-chrome-panel-2': dark ? mixHex(bg, away, 0.05) : mixHex(bg, toward, 0.08),
+    '--myssh-chrome-deep': mixHex(bg, toward, dark ? 0.45 : 0.1),
+    '--myssh-chrome-raised': mixHex(bg, away, dark ? 0.1 : 0.12),
+    '--myssh-chrome-border': mixHex(bg, away, dark ? 0.12 : 0.13),
     '--myssh-chrome-hover': mixHex(bg, away, dark ? 0.06 : 0.06),
     '--myssh-chrome-text': mixHex(fg, away, dark ? 0.35 : 0.55),
     '--myssh-chrome-text-dim': dark ? fg : mixHex(fg, away, 0.2),
