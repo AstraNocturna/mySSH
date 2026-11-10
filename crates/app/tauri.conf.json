@@ -26,7 +26,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY1MjczMzA2QjJCRjRFRDUKUldUVlRyK3lCak1uOWFBZHRDSEVQdW5sWWJsaHpyNHNNeXFDaE1rNEd2UXZndnJiMFlBeVo2T0cK",
-      "endpoints": ["https://github.com/xinchen2003/mySSH/releases/latest/download/latest.json"]
+      "endpoints": ["https://github.com/AstraNocturna/mySSH/releases/latest/download/latest.json"]
     }
   },
   "bundle": {
