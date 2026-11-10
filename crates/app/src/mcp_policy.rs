@@ -9,12 +9,16 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use core_policy::AccessLevel;
+use core_policy::{AccessLevel, PolicyEngine, PolicyLists};
 use core_store::{SessionRecord, Store};
 
 pub(crate) const GROUP_POLICIES_KEY: &str = "mcp.group_policies";
 /// 全局访问档位设置键（缺省 readonly）
 pub(crate) const LEVEL_KEY: &str = "mcp.level";
+/// 命令名单设置键（值为命令名数组；缺省 = 内置默认，空数组 = 名单为空）
+pub(crate) const WHITELIST_KEY: &str = "policy.whitelist";
+pub(crate) const BLACKLIST_KEY: &str = "policy.blacklist";
+pub(crate) const INDIRECT_KEY: &str = "policy.indirect";
 
 /// 单个分组的策略覆盖；字段缺省 = 继续向上继承
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, ts_rs::TS)]
@@ -87,6 +91,32 @@ pub(crate) async fn load_global_level(store: &Store) -> AccessLevel {
         .as_deref()
         .and_then(parse_level)
         .unwrap_or(AccessLevel::Readonly)
+}
+
+/// 命令名单设置值：JSON 字符串数组，或其 JSON 字符串；无法解析 → None（回落内置）
+pub(crate) fn parse_list_setting(key: &str, raw: &str) -> Option<Vec<String>> {
+    let parsed = match serde_json::from_str::<Value>(raw) {
+        Ok(Value::String(s)) => serde_json::from_str::<Vec<String>>(&s),
+        Ok(v) => serde_json::from_value::<Vec<String>>(v),
+        Err(e) => Err(e),
+    };
+    parsed
+        .map_err(|e| tracing::warn!(key, error = %e, "命令名单设置解析失败，按内置默认处理"))
+        .ok()
+}
+
+/// 每次调用现读三张名单构造分类器：改设置无需重启 MCP 服务
+pub(crate) async fn load_policy_engine(store: &Store) -> PolicyEngine {
+    let settings = store.settings();
+    let get = async |key: &str| {
+        let raw = settings.get(key).await.ok().flatten()?;
+        parse_list_setting(key, &raw)
+    };
+    PolicyEngine::with_lists(PolicyLists {
+        whitelist: get(WHITELIST_KEY).await,
+        blacklist: get(BLACKLIST_KEY).await,
+        indirect: get(INDIRECT_KEY).await,
+    })
 }
 
 /// 由近及远的祖先分组路径："a/b/c" → ["a/b/c", "a/b", "a"]；根（""）无分组策略
@@ -189,6 +219,19 @@ mod tests {
             },
         );
         g
+    }
+
+    #[test]
+    fn list_setting_parsing_is_tolerant() {
+        let want = Some(vec!["kill".to_string(), "rm".to_string()]);
+        assert_eq!(parse_list_setting("k", r#"["kill","rm"]"#), want);
+        // settings_set 再包一层 JSON 字符串
+        assert_eq!(parse_list_setting("k", r#""[\"kill\",\"rm\"]""#), want);
+        assert_eq!(parse_list_setting("k", "[]"), Some(Vec::new()));
+        assert_eq!(parse_list_setting("k", "kill,rm"), None);
+        assert_eq!(parse_list_setting("k", r#"{"a":1}"#), None);
+        assert_eq!(parse_list_setting("k", "[1,2]"), None);
+        assert_eq!(parse_list_setting("k", r#""oops""#), None);
     }
 
     #[test]

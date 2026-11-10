@@ -17,7 +17,7 @@ pub enum Verdict {
     Deny,
 }
 
-/// 默认只读白名单（M0；运行时由 core-store 的用户编辑版覆盖）
+/// 默认只读白名单（用户可在设置中编辑，见 PolicyLists）
 const READONLY_WHITELIST: &[&str] = &[
     "ls",
     "cat",
@@ -151,10 +151,53 @@ fn assignment_name(word: &str) -> Option<&str> {
     is_ident(name).then_some(name)
 }
 
-#[derive(Default)]
+/// 用户编辑的三张命令名单；None = 用内置默认，Some(空) = 该名单确实为空
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyLists {
+    pub whitelist: Option<Vec<String>>,
+    pub blacklist: Option<Vec<String>>,
+    pub indirect: Option<Vec<String>>,
+}
+
+/// 内置默认名单（设置页「恢复默认」与展示用）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinLists {
+    pub whitelist: Vec<String>,
+    pub blacklist: Vec<String>,
+    pub indirect: Vec<String>,
+}
+
+pub fn builtin_lists() -> BuiltinLists {
+    let own = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+    BuiltinLists {
+        whitelist: own(READONLY_WHITELIST),
+        blacklist: own(BLACKLIST),
+        indirect: own(INDIRECT_SHELLS),
+    }
+}
+
+/// 去首尾空白、丢空项、去重（保留首次出现的顺序）
+fn normalize(list: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(list.len());
+    for s in list {
+        let s = s.trim();
+        if !s.is_empty() && !out.iter().any(|x| x == s) {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
 pub struct PolicyEngine {
     whitelist: Vec<String>,
     blacklist: Vec<String>,
+    indirect: Vec<String>,
+}
+
+impl Default for PolicyEngine {
+    fn default() -> Self {
+        Self::with_lists(PolicyLists::default())
+    }
 }
 
 impl PolicyEngine {
@@ -162,27 +205,14 @@ impl PolicyEngine {
         Self::default()
     }
 
-    /// 注入用户编辑后的白/黑名单（core-store 加载；M6 接线）
-    pub fn with_lists(whitelist: Vec<String>, blacklist: Vec<String>) -> Self {
+    /// 注入用户编辑后的名单；各名单独立回落内置默认
+    pub fn with_lists(lists: PolicyLists) -> Self {
+        let builtin = builtin_lists();
+        let pick = |custom: Option<Vec<String>>, def: Vec<String>| custom.map_or(def, normalize);
         Self {
-            whitelist,
-            blacklist,
-        }
-    }
-
-    fn whitelist(&self) -> Vec<&str> {
-        if self.whitelist.is_empty() {
-            READONLY_WHITELIST.to_vec()
-        } else {
-            self.whitelist.iter().map(String::as_str).collect()
-        }
-    }
-
-    fn blacklist(&self) -> Vec<&str> {
-        if self.blacklist.is_empty() {
-            BLACKLIST.to_vec()
-        } else {
-            self.blacklist.iter().map(String::as_str).collect()
+            whitelist: pick(lists.whitelist, builtin.whitelist),
+            blacklist: pick(lists.blacklist, builtin.blacklist),
+            indirect: pick(lists.indirect, builtin.indirect),
         }
     }
 
@@ -195,12 +225,9 @@ impl PolicyEngine {
             Err(_) => return Verdict::RequireConfirmation,
         };
 
-        let whitelist = self.whitelist();
-        let blacklist = self.blacklist();
-
         let mut has_unproven = false;
         for sub in &subs {
-            match sub_risk(sub, &whitelist, &blacklist) {
+            match sub_risk(sub, self) {
                 PartRisk::Unparsed | PartRisk::Blacklist | PartRisk::Indirect => {
                     return Verdict::RequireConfirmation
                 }
@@ -229,8 +256,6 @@ impl PolicyEngine {
     /// 主命令名、写入的文件与风险（与 `classify` 同一单段判定）。heredoc 正文是数据，
     /// 不切成命令。结构无法解析时整条作为一段 Unparsed。
     pub fn explain(&self, cmd: &str) -> Vec<CommandPart> {
-        let whitelist = self.whitelist();
-        let blacklist = self.blacklist();
         let Ok(raw) = split_top_level(cmd) else {
             return vec![CommandPart {
                 text: cmd.trim().to_string(),
@@ -242,13 +267,11 @@ impl PolicyEngine {
             .map(|p| {
                 let (mut risk, cmds) = match split_subcommands(&p.scan) {
                     Ok(subs) => {
-                        let cmds: Vec<CmdInfo> = subs
-                            .iter()
-                            .filter_map(|s| cmd_info(s, &whitelist, &blacklist))
-                            .collect();
+                        let cmds: Vec<CmdInfo> =
+                            subs.iter().filter_map(|s| cmd_info(s, self)).collect();
                         let risk = subs
                             .iter()
-                            .map(|s| sub_risk(s, &whitelist, &blacklist))
+                            .map(|s| sub_risk(s, self))
                             .max()
                             .unwrap_or(PartRisk::ReadOnly);
                         (risk, cmds)
@@ -315,7 +338,7 @@ pub struct CmdInfo {
     pub risk: PartRisk,
 }
 
-fn cmd_info(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> Option<CmdInfo> {
+fn cmd_info(sub: &str, lists: &PolicyEngine) -> Option<CmdInfo> {
     let (head, sub_arg) = match split_command(sub)? {
         Cmd::Nothing { danger: None } => return None,
         Cmd::Nothing { danger: Some(v) } => (format!("{v}="), None),
@@ -329,7 +352,7 @@ fn cmd_info(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> Option<CmdInfo
     Some(CmdInfo {
         head,
         sub: sub_arg,
-        risk: sub_risk(sub, whitelist, blacklist),
+        risk: sub_risk(sub, lists),
     })
 }
 
@@ -411,7 +434,31 @@ impl PartRisk {
     }
 }
 
-fn sub_risk(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> PartRisk {
+fn contains(list: &[String], head: &str) -> bool {
+    list.iter().any(|s| s == head)
+}
+
+/// 前缀命令（sudo/nohup/nice/timeout/stdbuf）后面真正执行的命令文本
+fn wrapped_command(head: &str, args: &[&str]) -> Option<String> {
+    let mut rest = args.iter().copied().peekable();
+    while let Some(t) = rest.peek() {
+        if !t.starts_with('-') {
+            break;
+        }
+        let takes_value = WRAPPER_VALUE_OPTS.contains(t);
+        rest.next();
+        if takes_value {
+            rest.next();
+        }
+    }
+    if head == "timeout" {
+        rest.next(); // 时长
+    }
+    let inner: Vec<&str> = rest.collect();
+    (!inner.is_empty()).then(|| inner.join(" "))
+}
+
+fn sub_risk(sub: &str, lists: &PolicyEngine) -> PartRisk {
     let (head, args) = match split_command(sub) {
         None => return PartRisk::Unparsed,
         Some(Cmd::Nothing { danger: Some(_) }) => return PartRisk::Indirect,
@@ -424,11 +471,23 @@ fn sub_risk(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> PartRisk {
             };
         }
         Some(Cmd::Run { head, args, danger }) => {
-            if blacklist.contains(&head) {
+            if contains(&lists.blacklist, head) {
                 return PartRisk::Blacklist;
             }
-            if INDIRECT_SHELLS.contains(&head) || danger.is_some() {
+            if contains(&lists.indirect, head) || danger.is_some() {
                 return PartRisk::Indirect;
+            }
+            // 用户把前缀命令移出间接执行名单：仍要穿透判定被包的命令，
+            // 否则 sudo rm 在完全档会绕过黑名单
+            if WRAPPERS.contains(&head) {
+                if let Some(inner) = wrapped_command(head, &args) {
+                    let risk = sub_risk(&inner, lists);
+                    return if has_output_redirect(sub) {
+                        risk.max(PartRisk::Write)
+                    } else {
+                        risk
+                    };
+                }
             }
             (head, args)
         }
@@ -440,7 +499,7 @@ fn sub_risk(sub: &str, whitelist: &[&str], blacklist: &[&str]) -> PartRisk {
         return PartRisk::Indirect;
     }
     // 重定向到文件 = 写操作（> / >>）；输入重定向不单独判写
-    if !whitelist.contains(&head) || has_output_redirect(sub) || rule == ArgRule::Unproven {
+    if !contains(&lists.whitelist, head) || has_output_redirect(sub) || rule == ArgRule::Unproven {
         PartRisk::Write
     } else {
         PartRisk::ReadOnly
@@ -1532,6 +1591,150 @@ for p in /proc/[0-9]*; do v=$(awk '/^write_bytes/{print $2; exit}' $p/io 2>/dev/
             assert_eq!(v(c, Full), Verdict::RequireConfirmation, "{c}");
         }
         assert_eq!(e.explain("PATH=/tmp/x")[0].cmds[0].head, "PATH=");
+    }
+
+    fn names(l: &[&str]) -> Option<Vec<String>> {
+        Some(l.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn builtin_lists_match_consts() {
+        let b = builtin_lists();
+        assert_eq!(b.whitelist, READONLY_WHITELIST);
+        assert_eq!(b.blacklist, BLACKLIST);
+        assert_eq!(b.indirect, INDIRECT_SHELLS);
+        // None 全部回落内置
+        let e = PolicyEngine::with_lists(PolicyLists::default());
+        assert_eq!(e.whitelist, b.whitelist);
+        assert_eq!(e.blacklist, b.blacklist);
+        assert_eq!(e.indirect, b.indirect);
+    }
+
+    #[test]
+    fn custom_lists_are_normalized() {
+        let e = PolicyEngine::with_lists(PolicyLists {
+            blacklist: names(&[" kill ", "", "rm", "kill", "  "]),
+            ..PolicyLists::default()
+        });
+        assert_eq!(e.blacklist, ["kill", "rm"]);
+    }
+
+    #[test]
+    fn custom_blacklist_forces_confirmation_at_full() {
+        let mut black = builtin_lists().blacklist;
+        black.push("kill".into());
+        let e = PolicyEngine::with_lists(PolicyLists {
+            blacklist: Some(black),
+            ..PolicyLists::default()
+        });
+        assert_eq!(
+            e.classify("kill 1", AccessLevel::Full, false),
+            Verdict::RequireConfirmation
+        );
+        assert_eq!(e.explain("kill 1")[0].risk, PartRisk::Blacklist);
+        // 内置引擎下 kill 只是普通写操作
+        assert_eq!(
+            PolicyEngine::new().classify("kill 1", AccessLevel::Full, false),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn explicit_empty_blacklist_is_not_builtin() {
+        let e = PolicyEngine::with_lists(PolicyLists {
+            blacklist: Some(Vec::new()),
+            ..PolicyLists::default()
+        });
+        assert_eq!(e.explain("rm x")[0].risk, PartRisk::Write);
+        assert_eq!(
+            e.classify("rm x", AccessLevel::Standard, false),
+            Verdict::RequireConfirmation
+        );
+        assert_eq!(e.classify("rm x", AccessLevel::Full, false), Verdict::Allow);
+    }
+
+    #[test]
+    fn custom_indirect_and_whitelist() {
+        let mut white = builtin_lists().whitelist;
+        white.push("awk".into());
+        let indirect: Vec<String> = builtin_lists()
+            .indirect
+            .into_iter()
+            .filter(|s| s != "awk")
+            .collect();
+        let e = PolicyEngine::with_lists(PolicyLists {
+            whitelist: Some(white),
+            indirect: Some(indirect),
+            ..PolicyLists::default()
+        });
+        assert_eq!(
+            e.classify("awk '{print}' f", AccessLevel::Standard, false),
+            Verdict::Allow
+        );
+        assert_eq!(e.explain("awk '{print}' f")[0].risk, PartRisk::ReadOnly);
+        // 内置引擎下 awk 是间接执行器
+        assert_eq!(
+            PolicyEngine::new().classify("awk '{print}' f", AccessLevel::Standard, false),
+            Verdict::RequireConfirmation
+        );
+    }
+
+    #[test]
+    fn custom_whitelist_without_ls() {
+        let white: Vec<String> = builtin_lists()
+            .whitelist
+            .into_iter()
+            .filter(|s| s != "ls")
+            .collect();
+        let e = PolicyEngine::with_lists(PolicyLists {
+            whitelist: Some(white),
+            ..PolicyLists::default()
+        });
+        assert_eq!(
+            e.classify("ls", AccessLevel::Standard, false),
+            Verdict::RequireConfirmation
+        );
+        assert_eq!(
+            e.classify("ls", AccessLevel::Readonly, false),
+            Verdict::Deny
+        );
+        assert_eq!(
+            e.classify("cat f", AccessLevel::Readonly, false),
+            Verdict::Allow
+        );
+    }
+
+    /// 前缀命令移出间接执行名单后，被包的命令照常判定，黑名单不能被绕过
+    #[test]
+    fn wrapper_removed_from_indirect_still_checks_inner() {
+        let e = PolicyEngine::with_lists(PolicyLists {
+            indirect: Some(Vec::new()),
+            ..PolicyLists::default()
+        });
+        use AccessLevel::{Full, Standard};
+        for c in [
+            "sudo rm -rf /",
+            "sudo -u root rm x",
+            "timeout 5 rm -rf /",
+            "nice -n 5 rm x",
+            "nohup sudo rm x",
+        ] {
+            assert_eq!(
+                e.classify(c, Full, false),
+                Verdict::RequireConfirmation,
+                "{c}"
+            );
+            assert_eq!(e.explain(c)[0].risk, PartRisk::Blacklist, "{c}");
+        }
+        assert_eq!(e.classify("sudo ls", Standard, false), Verdict::Allow);
+        assert_eq!(
+            e.classify("sudo ls > /tmp/x", Standard, false),
+            Verdict::RequireConfirmation
+        );
+        assert_eq!(
+            e.classify("sudo touch x", Standard, false),
+            Verdict::RequireConfirmation
+        );
     }
 
     /// 逐段风险与整条判定一致：standard 档放行 ⇔ 每段都只读；确认 ⇔ 存在非只读段

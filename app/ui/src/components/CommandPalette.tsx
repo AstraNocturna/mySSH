@@ -4,7 +4,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { fuzzyMatchAny } from '../term/fuzzy';
 import { KEY_ACTIONS, keymapFromSettings } from '../term/keymap';
 import { reconnectRegistry } from '../term/registry';
-import { BUILTIN_THEMES } from '../term/themes';
+import { BUILTIN_THEMES, DEFAULT_THEME_ID } from '../term/themes';
 import { useAppStore } from '../state/app-store';
 import { GROUP_KEYS, readStringList, sshCommand } from '../state/groups';
 import { SNIPPETS_KEY, readSnippets, type Snippet } from '../term/snippets';
@@ -190,7 +190,8 @@ export function CommandPalette() {
         label: t('chrome.actTheme'),
         run: () => {
           const s = useAppStore.getState();
-          const cur = typeof s.settings['theme'] === 'string' ? s.settings['theme'] : 'one-dark';
+          const cur =
+            typeof s.settings['theme'] === 'string' ? s.settings['theme'] : DEFAULT_THEME_ID;
           const idx = BUILTIN_THEMES.findIndex((t) => t.id === cur);
           const next = BUILTIN_THEMES[(idx + 1) % BUILTIN_THEMES.length];
           s.setSetting('theme', next.id);

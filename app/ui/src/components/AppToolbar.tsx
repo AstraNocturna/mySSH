@@ -4,6 +4,7 @@ import { initBroadcastReceiver } from '../term/broadcast';
 import { keymapFromSettings } from '../term/keymap';
 import { useT } from '../i18n';
 import { useAiActivity } from '../state/ai-activity';
+import { Icon } from './Icon';
 
 /**
  * 右上角统一工具条（UX 批次 · 条目 8/13）：收纳原散落在窗口头部与 TabBar 的
@@ -53,7 +54,7 @@ export function AppToolbar() {
         disabled={!isRemote}
         onClick={() => toggleDock('sftp')}
       >
-        📂
+        <Icon name="folder" />
       </ToolBtn>
       <ToolBtn
         label={t('chrome.metricsLabel')}
@@ -62,7 +63,7 @@ export function AppToolbar() {
         disabled={!isRemote}
         onClick={() => toggleDock('metrics')}
       >
-        📈
+        <Icon name="activity" />
       </ToolBtn>
       <ToolBtn
         label={t('chrome.tunnelsLabel')}
@@ -71,7 +72,7 @@ export function AppToolbar() {
         disabled={!isRemote}
         onClick={() => toggleDock('tunnel')}
       >
-        ⇄
+        <Icon name="tunnel" />
       </ToolBtn>
       <ToolBtn
         label={t('chrome.broadcastLabel')}
@@ -79,7 +80,7 @@ export function AppToolbar() {
         active={broadcastEnabled}
         onClick={toggleBroadcast}
       >
-        📡
+        <Icon name="broadcast" />
       </ToolBtn>
       <ToolBtn
         label={t('chrome.transferLabel')}
@@ -91,7 +92,7 @@ export function AppToolbar() {
         badge={dockTab !== 'transfer' && transferActive ? transferActive : undefined}
         onClick={() => toggleDock('transfer')}
       >
-        ⇅
+        <Icon name="transfer" />
       </ToolBtn>
       <ToolBtn
         label={t('chrome.aiActivityLabel')}
@@ -111,7 +112,7 @@ export function AppToolbar() {
         active={settingsOpen}
         onClick={toggleSettings}
       >
-        ⚙
+        <Icon name="settings" />
       </ToolBtn>
     </div>
   );
@@ -139,11 +140,11 @@ function ToolBtn({
   return (
     <button
       type="button"
-      className={`relative flex h-6 w-6 items-center justify-center rounded text-sm leading-none ${
+      className={`relative flex h-7 w-7 items-center justify-center rounded-md text-sm leading-none ${
         active
-          ? 'bg-blue-800 text-neutral-100'
+          ? 'bg-blue-600/20 text-blue-300 ring-1 ring-blue-500/40 ring-inset'
           : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100'
-      } disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-neutral-400`}
+      } disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-neutral-400`}
       disabled={disabled}
       onClick={onClick}
       title={tooltip}
@@ -151,7 +152,7 @@ function ToolBtn({
     >
       {children}
       {badge !== undefined && badge > 0 && (
-        <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 animate-pulse items-center justify-center rounded-full bg-blue-600 px-0.5 text-[9px] font-medium leading-none text-white">
+        <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-blue-600 px-1 text-[9px] font-semibold leading-none text-white ring-2 ring-neutral-950">
           {badge > 99 ? '99+' : badge}
         </span>
       )}
@@ -160,5 +161,5 @@ function ToolBtn({
 }
 
 function Divider() {
-  return <span className="mx-1 h-4 w-px bg-neutral-700" />;
+  return <span className="mx-1.5 h-4 w-px bg-neutral-800" />;
 }

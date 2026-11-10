@@ -6,7 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore, type Pane, type Tab } from '../state/app-store';
 import { fitRegistry, termRegistry } from '../term/registry';
-import { resolveTheme } from '../term/themes';
+import { DEFAULT_THEME_ID, resolveTheme } from '../term/themes';
 import { effectiveXtermTheme, readTerminalSettings } from '../state/apply-settings';
 import { feedOf } from '../term/exec-mirror';
 import { ContextMenu, type MenuItem } from '../components/ContextMenu';
@@ -35,7 +35,7 @@ function createRuntime(paneId: string): MirrorRuntime {
     theme: effectiveXtermTheme(
       settings,
       resolveTheme(
-        typeof settings['theme'] === 'string' ? settings['theme'] : 'one-dark',
+        typeof settings['theme'] === 'string' ? settings['theme'] : DEFAULT_THEME_ID,
         typeof settings['theme.customJson'] === 'string' ? settings['theme.customJson'] : undefined,
       ),
     ),

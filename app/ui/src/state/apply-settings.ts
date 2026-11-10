@@ -5,7 +5,7 @@
 import { fitRegistry, termRegistry, webglRegistry } from '../term/registry';
 import type { ITheme } from '@xterm/xterm';
 import { WebglAddon } from '@xterm/addon-webgl';
-import { deriveChromeVars, resolveTheme, type ThemeDef } from '../term/themes';
+import { DEFAULT_THEME_ID, deriveChromeVars, resolveTheme, type ThemeDef } from '../term/themes';
 /** 背景图热更：CSS 变量写根节点，全部 pane 的背景层自动跟随。
  *  WebGL 画布不透明（实测）：有图时 dispose 已载 WebGL 回退内置渲染器；清图后重建恢复加速。 */
 export function applyTerminalBackground(settings: Record<string, unknown>): void {
@@ -70,7 +70,7 @@ export function readTerminalSettings(s: Record<string, unknown>): TerminalSettin
 /** 主题应用：root data-ui + chrome 派生变量 + 全终端调色板。返回生效主题 id（供面板显示）。 */
 export function applyTheme(settings: Record<string, unknown>): string {
   const def = resolveTheme(
-    str(settings['theme'], 'one-dark'),
+    str(settings['theme'], DEFAULT_THEME_ID),
     typeof settings['theme.customJson'] === 'string'
       ? (settings['theme.customJson'] as string)
       : undefined,
@@ -105,7 +105,6 @@ export function effectiveXtermTheme(settings: Record<string, unknown>, def: Them
 /** 字体/字号热改 + fit；回滚行数不动既有终端。 */
 export function applyTerminalSettings(settings: Record<string, unknown>): void {
   const t = readTerminalSettings(settings);
-  document.body.style.fontFamily = t.fontFamily;
   for (const [paneId, term] of termRegistry) {
     term.options.fontFamily = t.fontFamily;
     term.options.fontSize = t.fontSize;

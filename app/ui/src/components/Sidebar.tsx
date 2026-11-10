@@ -26,6 +26,7 @@ import {
 } from '../state/groups';
 import { useT, type MsgKey } from '../i18n';
 import { AiStatusBadge, useAiStatusMap } from './AiStatusBadge';
+import { Icon } from './Icon';
 
 /** 连接目标语义：'connect' 复用已有标签，'new-tab' 强制新标签 */
 type ConnectMode = 'connect' | 'new-tab';
@@ -560,13 +561,15 @@ export function Sidebar() {
             items: ids.length > 1 ? batchMenu(ids) : sessionMenu(rec),
           });
         }}
-        className={`group flex cursor-pointer items-center rounded px-1 py-1 outline-none ${
-          selected ? 'bg-neutral-700' : 'hover:bg-neutral-800 focus:bg-neutral-800'
+        className={`group flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-1 outline-none ${
+          selected
+            ? 'bg-blue-600/15 ring-1 ring-blue-500/30 ring-inset'
+            : 'hover:bg-neutral-800 focus:bg-neutral-800'
         }`}
         style={{
-          paddingLeft: `${depth * 12 + 8}px`,
+          paddingLeft: `${depth * 12 + 6}px`,
           contentVisibility: 'auto',
-          containIntrinsicSize: 'auto 44px',
+          containIntrinsicSize: 'auto 48px',
         }}
         title={
           rec.kind === 'local'
@@ -576,15 +579,25 @@ export function Sidebar() {
             : `${rec.username}@${rec.host}:${rec.port}`
         }
       >
+        <span
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-neutral-800 text-neutral-400"
+          style={rec.color ? { backgroundColor: `${rec.color}2e`, color: rec.color } : undefined}
+        >
+          <Icon name={rec.kind === 'local' ? 'terminal' : 'server'} size={14} />
+        </span>
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-1 text-sm text-neutral-200">
+          <span className="flex items-center gap-1 text-[13px] leading-5 text-neutral-100">
             {online.has(rec.id) && (
               <span
                 className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500"
                 title={t('chrome.onlineTitle')}
               />
             )}
-            {favorites.has(rec.id) && <span className="shrink-0 text-amber-400">★</span>}
+            {favorites.has(rec.id) && (
+              <span className="shrink-0 text-amber-400">
+                <Icon name="star" size={11} className="fill-current" />
+              </span>
+            )}
             <span className="truncate">{rec.name}</span>
             {rec.kind === 'local' && (
               <span className="shrink-0 rounded bg-neutral-700 px-1 text-[10px] text-neutral-300">
@@ -596,12 +609,12 @@ export function Sidebar() {
                 className="shrink-0 text-red-400"
                 title={t('chrome.lastFailed', { message: failed.get(rec.id) ?? '' })}
               >
-                ⚠
+                <Icon name="alert" size={12} />
               </span>
             )}
           </span>
           {/* AI 徽标放第二行：窄侧栏里让出空间的是主机地址而不是名称 */}
-          <span className="flex items-center gap-1 text-xs text-neutral-500">
+          <span className="flex items-center gap-1 font-mono text-[11px] leading-4 text-neutral-500">
             <AiStatusBadge sessionId={rec.id} status={aiStatus.get(rec.id)} />
             <span className="truncate">
               {rec.kind === 'local'
@@ -613,9 +626,9 @@ export function Sidebar() {
             </span>
           </span>
         </span>
-        <span className="hidden shrink-0 gap-1 group-hover:flex group-focus-within:flex">
+        <span className="hidden shrink-0 gap-0.5 group-hover:flex group-focus-within:flex">
           <button
-            className="rounded px-1 text-xs text-neutral-400 hover:text-green-400"
+            className="flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-700 hover:text-green-400"
             title={t('chrome.connect')}
             aria-label={t('chrome.connect')}
             onClick={(e) => {
@@ -623,19 +636,21 @@ export function Sidebar() {
               connect(rec);
             }}
           >
-            ▶
+            <Icon name="play" size={13} />
           </button>
           <button
-            className="rounded px-1 text-xs text-neutral-500 hover:text-neutral-200"
+            className="flex h-6 w-6 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
+            title={t('chrome.menuEdit')}
+            aria-label={t('chrome.menuEdit')}
             onClick={(e) => {
               e.stopPropagation();
               openConnect(rec);
             }}
           >
-            {t('chrome.menuEdit')}
+            <Icon name="pencil" size={13} />
           </button>
           <button
-            className="rounded px-1 text-xs text-neutral-500 hover:text-neutral-200"
+            className="flex h-6 w-6 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
             title={t('chrome.moreActions')}
             aria-label={t('chrome.moreActions')}
             onClick={(e) => {
@@ -650,7 +665,7 @@ export function Sidebar() {
               });
             }}
           >
-            ⋯
+            <Icon name="more" size={14} />
           </button>
         </span>
       </div>
@@ -682,11 +697,11 @@ export function Sidebar() {
             setMenu({ x: r.left + 16, y: r.bottom, items: groupMenu(path, count) });
           }
         }}
-        className="group flex cursor-pointer select-none items-center rounded px-1 py-1 outline-none hover:bg-neutral-800 focus:bg-neutral-800"
+        className="group mt-1 flex cursor-pointer select-none items-center rounded-md py-1 pr-1 text-neutral-500 outline-none hover:bg-neutral-800 focus:bg-neutral-800"
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
       >
         <button
-          className="mr-0.5 w-4 shrink-0 text-center"
+          className="mr-1 flex h-4 w-4 shrink-0 items-center justify-center"
           aria-label={isCollapsed ? t('chrome.expandGroup') : t('chrome.collapseGroup')}
           onClick={() =>
             persistCollapsed(
@@ -694,33 +709,38 @@ export function Sidebar() {
             )
           }
         >
-          {isCollapsed ? '▸' : '▾'}
+          <Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={13} strokeWidth={2} />
         </button>
-        <span className="min-w-0 flex-1 truncate text-sm text-neutral-300" title={path}>
+        <span
+          className="min-w-0 flex-1 truncate text-xs font-semibold text-neutral-300"
+          title={path}
+        >
           {name}
         </span>
-        <span className="shrink-0 text-xs text-neutral-500">{count}</span>
+        <span className="shrink-0 rounded-full bg-neutral-800 px-1.5 text-[10px] leading-4 tabular-nums text-neutral-400 group-hover:hidden">
+          {count}
+        </span>
         <span className="hidden shrink-0 gap-0.5 group-hover:flex">
           <button
-            className="rounded px-0.5 hover:text-neutral-200"
+            className="flex h-5 w-5 items-center justify-center rounded hover:text-neutral-200"
             title={t('chrome.newSubgroup')}
             aria-label={t('chrome.newSubgroup')}
             onClick={() => setPrompt({ mode: 'group-new', parent: path, input: '' })}
           >
-            ＋
+            <Icon name="plus" size={13} />
           </button>
           <button
-            className="rounded px-0.5 hover:text-neutral-200"
+            className="flex h-5 w-5 items-center justify-center rounded hover:text-neutral-200"
             title={t('chrome.rename')}
             aria-label={t('chrome.renameGroupAria')}
             onClick={() =>
               setPrompt({ mode: 'group-rename', path, input: path.split('/').pop() ?? path })
             }
           >
-            ✏
+            <Icon name="pencil" size={12} />
           </button>
           <button
-            className="rounded px-0.5 hover:text-red-400"
+            className="flex h-5 w-5 items-center justify-center rounded hover:text-red-400"
             title={t('chrome.menuDeleteGroup')}
             aria-label={t('chrome.menuDeleteGroup')}
             onClick={() => {
@@ -732,7 +752,7 @@ export function Sidebar() {
               }
             }}
           >
-            ×
+            <Icon name="x" size={13} />
           </button>
         </span>
       </div>
@@ -760,13 +780,18 @@ export function Sidebar() {
           void setSetting('ui.sidebarWidth', next);
         }}
       />
-      <div className="px-3 py-2 text-xs text-neutral-400">
+      <div className="px-3 pt-3 pb-2 text-[11px] font-semibold tracking-wider text-neutral-500 uppercase">
         <span>{t('chrome.sessionsHeader')}</span>
       </div>
 
-      <div className="px-2 pb-1">
+      <div className="relative px-2 pb-2">
+        <Icon
+          name="search"
+          size={13}
+          className="pointer-events-none absolute top-2 left-4 text-neutral-500"
+        />
         <input
-          className="w-full rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-xs text-neutral-300 outline-none placeholder:text-neutral-600 focus:border-neutral-600"
+          className="h-7 w-full rounded-md border border-neutral-800 bg-neutral-950 pr-2 pl-7 text-xs text-neutral-300 placeholder:text-neutral-600"
           placeholder={t('chrome.searchPlaceholder')}
           aria-label={t('chrome.searchAria')}
           value={query}
@@ -781,10 +806,10 @@ export function Sidebar() {
           return (
             <button
               key={v.id}
-              className={`rounded px-1.5 py-0.5 text-xs ${
+              className={`rounded-full border px-2 py-0.5 text-[11px] ${
                 virt === v.id
-                  ? 'bg-blue-800 text-neutral-100'
-                  : 'text-neutral-500 hover:bg-neutral-800'
+                  ? 'border-blue-500/40 bg-blue-600/20 text-blue-300'
+                  : 'border-neutral-800 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300'
               }`}
               title={t(v.labelKey)}
               onClick={() => setVirt((cur) => (cur === v.id ? null : v.id))}
@@ -797,7 +822,7 @@ export function Sidebar() {
       </div>
 
       <div
-        className="flex-1 overflow-y-auto px-1 pb-2"
+        className="flex flex-1 flex-col gap-px overflow-y-auto px-1.5 pb-2"
         role="listbox"
         onContextMenu={(e) => {
           if (e.target === e.currentTarget) {

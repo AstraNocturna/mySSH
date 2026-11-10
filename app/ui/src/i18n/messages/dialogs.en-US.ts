@@ -211,6 +211,29 @@ export const enDialogs: Record<keyof typeof zhDialogs, string> = {
   'dialogs.navAppearance': 'Appearance',
   'dialogs.navMcp': 'MCP',
   'dialogs.navShortcuts': 'Shortcuts',
+  'dialogs.navPolicy': 'Command policy',
+  // Command policy lists (policy.whitelist / blacklist / indirect)
+  'dialogs.policyIntro':
+    'When an AI runs commands over MCP, risk is judged with the three lists below: blacklist first, then indirect executors, then the whitelist. Changes apply to the next command, no restart needed.',
+  'dialogs.policyBlacklist': 'Blacklist (dangerous commands)',
+  'dialogs.policyBlacklistHint':
+    'Matches are high risk: they always need manual approval at every level and can never auto-run. Emptying this list removes that safeguard.',
+  'dialogs.policyIndirect': 'Indirect executors',
+  'dialogs.policyIndirectHint':
+    'Programs that run other commands or scripts (bash, xargs, sudo...). Their effect cannot be judged statically, so they need approval at every level (Auto-run can skip repeats).',
+  'dialogs.policyWhitelist': 'Whitelist (read-only commands)',
+  'dialogs.policyWhitelistHint':
+    'Safe read-only commands. At the Read-only level only these are allowed; at Standard they run without approval.',
+  'dialogs.policyCustomized': 'Customized',
+  'dialogs.policyDefault': 'Default',
+  'dialogs.policyReset': 'Restore defaults',
+  'dialogs.policyLoading': 'Loading built-in list...',
+  'dialogs.policyEmpty': '(empty list)',
+  'dialogs.policyAddPh': 'Command name; separate several with spaces or commas',
+  'dialogs.policyAddAria': 'Add to {list}',
+  'dialogs.policyAdd': 'Add',
+  'dialogs.policyRemoveAria': 'Remove {cmd}',
+  'dialogs.policyLoadFailed': 'Failed to load built-in lists: {msg}',
   'dialogs.themeDarkBadge': 'Dark',
   'dialogs.themeLightBadge': 'Light',
   'dialogs.themeCustomAria': 'Custom theme editor',

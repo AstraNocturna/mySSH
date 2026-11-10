@@ -230,6 +230,7 @@ pub fn run() {
             settings::settings_list,
             settings::settings_set,
             settings::settings_delete,
+            settings::policy_defaults,
             mcp::mcp_status,
             mcp::mcp_restart,
             mcp_ui::mcp_ui_subscribe,

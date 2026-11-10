@@ -17,7 +17,7 @@ import {
   type Tab,
 } from '../state/app-store';
 import { fitRegistry, reconnectRegistry, termRegistry, webglRegistry } from '../term/registry';
-import { resolveTheme } from '../term/themes';
+import { DEFAULT_THEME_ID, resolveTheme } from '../term/themes';
 import {
   effectiveXtermTheme,
   readTermBackground,
@@ -187,7 +187,7 @@ export function TerminalView({ tab, pane }: { tab: Tab; pane: Pane }) {
         theme: effectiveXtermTheme(
           settings,
           resolveTheme(
-            typeof settings['theme'] === 'string' ? settings['theme'] : 'one-dark',
+            typeof settings['theme'] === 'string' ? settings['theme'] : DEFAULT_THEME_ID,
             typeof settings['theme.customJson'] === 'string'
               ? settings['theme.customJson']
               : undefined,

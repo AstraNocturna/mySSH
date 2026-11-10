@@ -1,4 +1,4 @@
-//! 设置命令族：settings_list / settings_set / settings_delete（M5）。
+//! 设置命令族：settings_list / settings_set / settings_delete（M5），及命令名单默认值 policy_defaults。
 //! KV 透传（值 JSON 文本）；键白名单约束在前端常量，后端只拒空键。
 
 use std::sync::Arc;
@@ -45,6 +45,13 @@ pub async fn settings_set(
         .set(&key, &text)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// 内置命令名单（设置键 policy.whitelist / policy.blacklist / policy.indirect 的默认值）
+#[tauri::command]
+pub fn policy_defaults() -> Value {
+    let b = core_policy::builtin_lists();
+    json!({ "whitelist": b.whitelist, "blacklist": b.blacklist, "indirect": b.indirect })
 }
 
 #[tauri::command]

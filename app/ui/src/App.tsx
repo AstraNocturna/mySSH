@@ -35,6 +35,7 @@ import { EmptyState } from './components/EmptyState';
 import { QuickConnectDialog } from './components/QuickConnectDialog';
 import { checkForUpdate, dismissUpdate, installUpdate, type UpdateInfo } from './state/updater';
 import { useT } from './i18n';
+import { Icon } from './components/Icon';
 
 export function App() {
   const [version, setVersion] = useState('…');
@@ -230,21 +231,26 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5 text-xs text-neutral-400">
+      <header className="flex h-10 shrink-0 items-center justify-between border-b border-neutral-800 px-2 text-xs text-neutral-400">
         <span className="flex items-center gap-2">
           <button
-            className="rounded px-1 hover:bg-neutral-800"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
             onClick={toggleSidebar}
             aria-label={t('chrome.sidebarToggle')}
             title={t('chrome.sidebarToggle')}
           >
-            ☰
+            <Icon name="menu" />
           </button>
-          <span className="font-semibold text-neutral-200">mySSH</span>
+          <span className="flex items-center gap-2">
+            <span className="myssh-logo flex h-5 w-5 items-center justify-center rounded-md text-white">
+              <Icon name="terminal" size={12} strokeWidth={2.5} />
+            </span>
+            <span className="text-[13px] font-semibold tracking-tight text-neutral-100">mySSH</span>
+          </span>
         </span>
         <span className="flex items-center gap-2">
           <AppToolbar />
-          <span>v{version}</span>
+          <span className="tabular-nums text-[11px] text-neutral-500">v{version}</span>
         </span>
       </header>
       <TabBar />

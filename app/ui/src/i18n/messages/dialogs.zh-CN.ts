@@ -204,6 +204,29 @@ export const zhDialogs = {
   'dialogs.navAppearance': '外观',
   'dialogs.navMcp': 'MCP',
   'dialogs.navShortcuts': '快捷键',
+  'dialogs.navPolicy': '命令策略',
+  // 命令策略名单（policy.whitelist / blacklist / indirect）
+  'dialogs.policyIntro':
+    'AI 通过 MCP 执行命令时，按下面三份名单判断风险：黑名单优先，其次间接执行器，再看白名单。修改后下一条命令立即生效，无需重启。',
+  'dialogs.policyBlacklist': '黑名单（高危命令）',
+  'dialogs.policyBlacklistHint':
+    '命中即视为高危：任何档位都必须人工确认，且不能「自动执行」。清空后高危命令不再强制确认，请谨慎。',
+  'dialogs.policyIndirect': '间接执行器',
+  'dialogs.policyIndirectHint':
+    '会再去执行别的命令或脚本的程序（如 bash、xargs、sudo）。无法静态判断实际会做什么，任何档位都需人工确认（可用「自动执行」免去重复确认）。',
+  'dialogs.policyWhitelist': '白名单（只读命令）',
+  'dialogs.policyWhitelistHint':
+    '只读、安全的命令。「只读」档位下仅允许这些命令；「标准」档位下这些命令免确认直接执行。',
+  'dialogs.policyCustomized': '已自定义',
+  'dialogs.policyDefault': '默认',
+  'dialogs.policyReset': '恢复默认',
+  'dialogs.policyLoading': '正在加载内置名单…',
+  'dialogs.policyEmpty': '（空名单）',
+  'dialogs.policyAddPh': '输入命令名，空格或逗号分隔可一次添加多个',
+  'dialogs.policyAddAria': '添加到{list}',
+  'dialogs.policyAdd': '添加',
+  'dialogs.policyRemoveAria': '移除 {cmd}',
+  'dialogs.policyLoadFailed': '读取内置名单失败：{msg}',
   'dialogs.themeDarkBadge': '暗',
   'dialogs.themeLightBadge': '亮',
   'dialogs.themeCustomAria': '自定义主题编辑器',

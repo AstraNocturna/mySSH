@@ -3,6 +3,7 @@ import { isLocalTarget, primaryPane, useAppStore, type Tab } from '../state/app-
 import { ContextMenu, type MenuItem } from './ContextMenu';
 import { useT } from '../i18n';
 import { AiStatusBadge, useAiStatusMap } from './AiStatusBadge';
+import { Icon } from './Icon';
 
 const STATE_DOT: Record<string, string> = {
   connecting: 'bg-yellow-500',
@@ -113,7 +114,7 @@ export function TabBar() {
   };
 
   return (
-    <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-800 bg-neutral-900 px-2 py-1">
+    <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800 bg-neutral-900 px-1.5">
       {tabs.map((t) => {
         const pane = primaryPane(t);
         const aiKind = Object.values(t.panes)
@@ -144,10 +145,10 @@ export function TabBar() {
                 ? { backgroundColor: `${sessionColor}${t.id === activeId ? '66' : '40'}` }
                 : undefined
             }
-            className={`group flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-xs focus-visible:ring-1 focus-visible:ring-neutral-500 ${
+            className={`group flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md pr-1 pl-2.5 text-xs ${
               t.id === activeId
-                ? `${sessionColor ? '' : 'bg-neutral-700 '}text-neutral-100`
-                : 'text-neutral-400 hover:bg-neutral-800'
+                ? `${sessionColor ? '' : 'bg-neutral-800 '}text-neutral-100 shadow-[inset_0_-2px_0_var(--myssh-chrome-accent)]`
+                : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200'
             }`}
             role="tab"
             tabIndex={0}
@@ -197,24 +198,28 @@ export function TabBar() {
               />
             )}
             <button
-              className="ml-1 hidden group-focus-within:inline text-neutral-500 hover:text-neutral-200 group-hover:inline"
+              className={`ml-0.5 flex h-5 w-5 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-100 group-hover:opacity-100 group-focus-within:opacity-100 ${
+                t.id === activeId ? 'opacity-100' : 'opacity-0'
+              }`}
               onClick={(e) => {
                 e.stopPropagation();
                 closeTab(t.id);
               }}
               aria-label={tr('chrome.closeTabAria')}
             >
-              ×
+              <Icon name="x" size={12} strokeWidth={2} />
             </button>
           </div>
         );
       })}
       {/* 功能图标统一收进 AppToolbar（UX 批次 · 条目 8）；此处只保留标签与新建按钮 */}
       <button
-        className="rounded px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+        className="flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
         onClick={() => openConnect()}
         aria-label={tr('chrome.newConnection')}
+        title={tr('chrome.newConnection')}
       >
+        <Icon name="plus" size={14} />
         {tr('chrome.newConnection')}
       </button>
       {menu && (

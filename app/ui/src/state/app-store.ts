@@ -390,6 +390,8 @@ interface AppStore {
   loadSettings(): Promise<void>;
   /** 乐观本地更新 + 落库（theme/terminal 键的副作用由 App 效果层统一应用） */
   setSetting(key: string, value: unknown): void;
+  /** 删除设置项（回到缺省值） */
+  deleteSetting(key: string): Promise<void>;
   /** 设置面板开关 */
   settingsOpen: boolean;
   toggleSettings(): void;
@@ -630,6 +632,12 @@ export const useAppStore = create<AppStore>((set, get) => {
     setSetting: (key, value) => {
       set((s) => ({ settings: { ...s.settings, [key]: value } }));
       invoke('settings_set', { key, value }).catch(() => undefined);
+    },
+    deleteSetting: async (key) => {
+      set((s) => ({
+        settings: Object.fromEntries(Object.entries(s.settings).filter(([k]) => k !== key)),
+      }));
+      await invoke('settings_delete', { key });
     },
 
     openDock: (tab) => {

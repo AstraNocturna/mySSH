@@ -1,24 +1,40 @@
 @import 'tailwindcss';
 @import '@xterm/xterm/css/xterm.css';
 
+/* 界面字体走系统无衬线（中文微软雅黑、西文 Segoe UI）；终端/路径/命令用 font-mono。
+   --radius 覆写让裸 rounded 也变为 var() 引用，整体圆角统一放大一档。 */
+@theme {
+  --font-sans:
+    'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC',
+    system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, 'Microsoft YaHei UI', monospace;
+  --radius: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --shadow-xl: 0 24px 48px -12px rgb(0 0 0 / 0.55), 0 8px 16px -8px rgb(0 0 0 / 0.35);
+  --shadow-2xl: 0 32px 64px -16px rgb(0 0 0 / 0.6);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --default-transition-duration: 140ms;
+  --default-transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+}
 :root {
   color-scheme: dark;
-  /* chrome 换肤变量：默认值 = 原暗档 neutral 刻度（JS 未跑时无回归）；
+  /* chrome 换肤变量：默认值 = 默认主题 mySSH 深空的派生结果（JS 未跑时无闪烁）；
      applyTheme 按主题 xterm 调色板派生后覆盖（deriveChromeVars）。 */
-  --myssh-chrome-body: #0b0e14;
-  --myssh-chrome-panel: #171717;
-  --myssh-chrome-panel-2: #262626;
-  --myssh-chrome-deep: #0a0a0a;
-  --myssh-chrome-raised: #404040;
-  --myssh-chrome-border: #404040;
-  --myssh-chrome-hover: #262626;
-  --myssh-chrome-text: #f5f5f5;
-  --myssh-chrome-text-dim: #bfbdb6;
-  --myssh-chrome-text-faint: #a3a3a3;
-  --myssh-chrome-accent: #2563eb;
-  --myssh-chrome-accent-hover: #3b82f6;
-  --myssh-chrome-accent-deep: #1d4ed8;
-  --myssh-chrome-accent-text: #93c5fd;
+  --myssh-chrome-body: #0f1014;
+  --myssh-chrome-panel: #121418;
+  --myssh-chrome-panel-2: #222428;
+  --myssh-chrome-deep: #0c0d10;
+  --myssh-chrome-raised: #2d2f34;
+  --myssh-chrome-border: #323438;
+  --myssh-chrome-hover: #24262b;
+  --myssh-chrome-text: #dfe2ea;
+  --myssh-chrome-text-dim: #cdd3de;
+  --myssh-chrome-text-faint: #7b7f87;
+  --myssh-chrome-accent: #5b8cff;
+  --myssh-chrome-accent-hover: #6f9aff;
+  --myssh-chrome-accent-deep: #4062b3;
+  --myssh-chrome-accent-text: #94b4ff;
   /* Tailwind 4 的 blue 工具类全部编译自 --color-blue-*（含 /透明度 与 hover
      变体），此处改向主题强调色刻度，按钮/徽标/active 页签一键换肤。 */
   --color-blue-300: var(--myssh-chrome-accent-text);
@@ -39,9 +55,109 @@ body,
      textarea 溢出视口，浏览器 reveal 会把整页横向往右顶。clip 禁止横向滚动
      （含程序化 reveal），候选框仍由 OS 按光标位置弹出。 */
   overflow-x: clip;
-  background: #0b0e14;
-  color: #bfbdb6;
-  font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  background: #0f1014;
+  color: #cdd3de;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------- 全局交互质感 ----------
+   放进 base 层：组件上的 Tailwind 工具类（utilities 层）一律优先；只过渡颜色类属性，不用 all。 */
+@layer base {
+  :where(button, a, [role='tab'], [role='option'], input, select, textarea) {
+    transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+    transition-duration: 140ms;
+    transition-timing-function: var(--ease-out);
+  }
+  /* 按下回弹：确认界面听到了点击 */
+  :where(button):not(:disabled):active {
+    transform: scale(0.97);
+  }
+  :where(button, [role='tab'], a, summary):focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--myssh-chrome-accent) 70%, transparent);
+    outline-offset: 1px;
+  }
+  /* 表单控件：聚焦描边 + 柔光环（xterm 隐藏 textarea 排除） */
+  :where(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea):not(
+      .xterm-helper-textarea
+    ):focus {
+    border-color: var(--myssh-chrome-accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--myssh-chrome-accent) 22%, transparent);
+    outline: none;
+  }
+  input[type='checkbox'],
+  input[type='radio'],
+  input[type='range'] {
+    accent-color: var(--myssh-chrome-accent);
+  }
+}
+::selection {
+  background: color-mix(in srgb, var(--myssh-chrome-accent) 35%, transparent);
+}
+/* 细滚动条：轨道透明，滑块随主题文字色淡显 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  background-color: color-mix(in srgb, var(--myssh-chrome-text) 18%, transparent);
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--myssh-chrome-text) 32%, transparent);
+}
+/* 对话框：遮罩模糊淡入，面板轻微放大淡入（偶发操作，值得动画） */
+@keyframes myssh-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes myssh-dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+  }
+}
+.myssh-backdrop {
+  background-color: rgb(0 0 0 / 0.5);
+  backdrop-filter: blur(3px);
+  animation: myssh-fade-in 160ms var(--ease-out);
+}
+.myssh-dialog-pop {
+  animation: myssh-dialog-in 200ms var(--ease-out);
+}
+/* 键帽 */
+.myssh-kbd {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--myssh-chrome-border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--myssh-chrome-text-dim);
+  background: var(--myssh-chrome-panel-2);
+}
+/* 品牌标：强调色渐变圆角方块 */
+.myssh-logo {
+  background: linear-gradient(
+    135deg,
+    var(--myssh-chrome-accent-hover),
+    var(--myssh-chrome-accent-deep)
+  );
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--myssh-chrome-accent) 40%, transparent),
+    0 4px 12px -2px color-mix(in srgb, var(--myssh-chrome-accent) 45%, transparent);
 }
 
 /* chrome 换肤（整体化）：UI 骨架的 neutral/blue 刻度全部经 Tailwind 4 主题变量
@@ -199,6 +315,8 @@ html[data-term-bg='1'] .myssh-term-host .xterm-scrollable-element {
   .myssh-flash-fail,
   .myssh-progress-running,
   .myssh-menu-pop,
+  .myssh-backdrop,
+  .myssh-dialog-pop,
   .animate-pulse {
     animation: none;
   }
