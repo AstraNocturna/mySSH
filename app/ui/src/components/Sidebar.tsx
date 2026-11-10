@@ -25,6 +25,7 @@ import {
   GROUP_KEYS,
 } from '../state/groups';
 import { useT, type MsgKey } from '../i18n';
+import { AiStatusBadge, useAiStatusMap } from './AiStatusBadge';
 
 /** 连接目标语义：'connect' 复用已有标签，'new-tab' 强制新标签 */
 type ConnectMode = 'connect' | 'new-tab';
@@ -123,6 +124,7 @@ export function Sidebar() {
     [settings],
   );
   const extras = useMemo(() => readStringList(settings[GROUP_KEYS.extraGroups]), [settings]);
+  const aiStatus = useAiStatusMap();
   const online = useMemo(() => {
     const set = new Set<string>();
     for (const t of tabs) {
@@ -598,13 +600,17 @@ export function Sidebar() {
               </span>
             )}
           </span>
-          <span className="block truncate text-xs text-neutral-500">
-            {rec.kind === 'local'
-              ? rec.workdir || rec.shell || t('chrome.localTerminal')
-              : `${rec.username}@${rec.host}:${rec.port}`}
-            {rec.kind !== 'local' &&
-              rec.jumpChain.length > 0 &&
-              ` · ${t('chrome.jumpHops', { count: rec.jumpChain.length })}`}
+          {/* AI 徽标放第二行：窄侧栏里让出空间的是主机地址而不是名称 */}
+          <span className="flex items-center gap-1 text-xs text-neutral-500">
+            <AiStatusBadge sessionId={rec.id} status={aiStatus.get(rec.id)} />
+            <span className="truncate">
+              {rec.kind === 'local'
+                ? rec.workdir || rec.shell || t('chrome.localTerminal')
+                : `${rec.username}@${rec.host}:${rec.port}`}
+              {rec.kind !== 'local' &&
+                rec.jumpChain.length > 0 &&
+                ` · ${t('chrome.jumpHops', { count: rec.jumpChain.length })}`}
+            </span>
           </span>
         </span>
         <span className="hidden shrink-0 gap-1 group-hover:flex group-focus-within:flex">

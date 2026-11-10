@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { isLocalTarget, primaryPane, useAppStore, type Tab } from '../state/app-store';
 import { ContextMenu, type MenuItem } from './ContextMenu';
 import { useT } from '../i18n';
+import { AiStatusBadge, useAiStatusMap } from './AiStatusBadge';
 
 const STATE_DOT: Record<string, string> = {
   connecting: 'bg-yellow-500',
@@ -23,6 +24,7 @@ export function TabBar() {
   const sessions = useAppStore((s) => s.sessions);
   const aiTabs = useAppStore((s) => s.aiTabs);
   const recTabs = useAppStore((s) => s.recTabs);
+  const aiStatus = useAiStatusMap();
 
   /** 标签右键菜单（批次四 10.3） */
   const [menu, setMenu] = useState<{ x: number; y: number; tab: Tab } | null>(null);
@@ -177,6 +179,9 @@ export function TabBar() {
               >
                 AI
               </span>
+            )}
+            {tabSessionId && (
+              <AiStatusBadge sessionId={tabSessionId} status={aiStatus.get(tabSessionId)} />
             )}
             {recording && (
               <span

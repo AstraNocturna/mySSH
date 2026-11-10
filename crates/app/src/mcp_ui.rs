@@ -7,10 +7,14 @@
 //! 用户选「总是允许」时记下（会话, 完全相同的命令），之后同会话同命令免确认；
 //! 规则只在内存，应用重启即失效。
 //! 通道不存在（窗口未就绪/无前端，如测试）时审批不可用，调用方 fail-closed。
+//!
+//! AI 活动登记：进行中的 ssh_exec / recipe_run 在此登记（不依赖镜像开关），活动有变化时推
+//! `ai_activity` 提示帧，前端再经 `mcp_activity` 取快照（含后台命令与 AI 终端），
+//! 用户可在活动面板经 `mcp_activity_stop` 停止。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -40,6 +44,16 @@ struct Approval {
 /// 前端开标签的结果：Ok(后端 tabId) / Err(连接失败原因)
 type TabResult = Result<String, String>;
 
+/// 一条进行中的 AI 一次性命令（ssh_exec / recipe_run）
+struct ExecActivity {
+    session_id: String,
+    tool: String,
+    command: String,
+    /// unix 毫秒
+    started_at: u64,
+    cancel: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Default)]
 pub struct McpUiHub {
     sink: Mutex<Option<UiSink>>,
@@ -48,6 +62,29 @@ pub struct McpUiHub {
     always: Mutex<HashSet<(String, String)>>,
     /// agent terminal_open 请前端开标签：requestId → 结果回传
     tab_waiters: Mutex<HashMap<String, oneshot::Sender<TabResult>>>,
+    /// 进行中的 AI 一次性命令：execId → 登记
+    execs: Mutex<HashMap<String, ExecActivity>>,
+}
+
+/// 一次 AI 命令的活动登记凭据；drop 即注销（正常结束、超时、取消、任务被中止都覆盖）
+pub(crate) struct ExecTicket {
+    hub: Arc<McpUiHub>,
+    id: String,
+    cancel: Arc<tokio::sync::Notify>,
+}
+
+impl ExecTicket {
+    /// 用户在活动面板停止该命令时返回
+    pub(crate) async fn cancelled(&self) {
+        self.cancel.notified().await;
+    }
+}
+
+impl Drop for ExecTicket {
+    fn drop(&mut self) {
+        self.hub.execs.lock().remove(&self.id);
+        self.hub.activity_changed();
+    }
 }
 
 fn random_id() -> String {
@@ -206,6 +243,71 @@ impl McpUiHub {
         }
     }
 
+    /// 提示前端 AI 活动有变化（前端随后经 mcp_activity 取快照）；窗口不在线时无操作
+    pub(crate) fn activity_changed(&self) {
+        self.emit(&json!({ "type": "ai_activity" }));
+    }
+
+    pub(crate) fn track_exec(
+        self: &Arc<Self>,
+        session_id: &str,
+        tool: &str,
+        command: &str,
+    ) -> ExecTicket {
+        let id = random_id();
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        self.execs.lock().insert(
+            id.clone(),
+            ExecActivity {
+                session_id: session_id.to_string(),
+                tool: tool.to_string(),
+                command: command.to_string(),
+                started_at,
+                cancel: cancel.clone(),
+            },
+        );
+        self.activity_changed();
+        ExecTicket {
+            hub: self.clone(),
+            id,
+            cancel,
+        }
+    }
+
+    /// 用户停止一条进行中的命令；返回 (是否找到, 所属会话)
+    pub(crate) fn cancel_exec(&self, id: &str) -> Option<String> {
+        let map = self.execs.lock();
+        let a = map.get(id)?;
+        // notify_one 在无人等待时也会留一个许可：select 稍后进入等待也能立刻收到
+        a.cancel.notify_one();
+        Some(a.session_id.clone())
+    }
+
+    /// 进行中的 AI 命令（旧→新）
+    pub(crate) fn exec_snapshot(&self) -> Vec<Value> {
+        let map = self.execs.lock();
+        let mut items: Vec<(u64, Value)> = map
+            .iter()
+            .map(|(id, a)| {
+                (
+                    a.started_at,
+                    json!({
+                        "execId": id,
+                        "sessionId": a.session_id,
+                        "tool": a.tool,
+                        "command": a.command,
+                        "startedAt": a.started_at,
+                    }),
+                )
+            })
+            .collect();
+        items.sort_by_key(|(t, _)| *t);
+        items.into_iter().map(|(_, v)| v).collect()
+    }
+
     /// 批准并记下「总是允许」规则；未知/已过期审批项返回 false 且不记规则
     pub(crate) fn allow_always(&self, id: &str) -> bool {
         let key = {
@@ -315,7 +417,7 @@ impl ExecMirror {
         }));
     }
 
-    /// status: ok / error / timeout；error 为失败原因
+    /// status: ok / error / timeout / cancelled；error 为失败原因
     pub(crate) fn finish(
         self,
         status: &str,
@@ -366,6 +468,69 @@ pub async fn mcp_approve(
         return Ok(hub.allow_always(&id));
     }
     Ok(hub.decide(&id, allow))
+}
+
+/// AI 活动快照：进行中的一次性命令、运行中的后台命令、未关闭的 AI 终端
+#[tauri::command]
+pub async fn mcp_activity(
+    hub: tauri::State<'_, Arc<McpUiHub>>,
+    jobs: tauri::State<'_, Arc<crate::mcp_jobs::McpJobs>>,
+    terms: tauri::State<'_, Arc<crate::mcp_terminal::McpTerminalState>>,
+) -> Result<Value, String> {
+    Ok(json!({
+        "execs": hub.exec_snapshot(),
+        "jobs": jobs.running_snapshot(),
+        "terminals": terms.live_snapshot(),
+    }))
+}
+
+/// 用户在活动面板停止一项 AI 活动：kind = exec / job / terminal
+#[tauri::command]
+pub async fn mcp_activity_stop(
+    kind: String,
+    id: String,
+    hub: tauri::State<'_, Arc<McpUiHub>>,
+    jobs: tauri::State<'_, Arc<crate::mcp_jobs::McpJobs>>,
+    terms: tauri::State<'_, Arc<crate::mcp_terminal::McpTerminalState>>,
+    sessions: tauri::State<'_, Arc<crate::sessions::SessionManagerState>>,
+) -> Result<(), String> {
+    let store = &sessions.store;
+    let gone = || format!("该项已结束：{id}");
+    match kind.as_str() {
+        "exec" => {
+            let sid = hub.cancel_exec(&id).ok_or_else(gone)?;
+            let _ = store
+                .audit()
+                .append(
+                    core_store::Actor::Gui,
+                    Some(&sid),
+                    "mcp_exec_cancel",
+                    &json!({ "execId": id }),
+                )
+                .await;
+        }
+        "job" => {
+            let sid = jobs.session_of(&id).ok_or_else(gone)?;
+            let body = crate::mcp_jobs::job_stop(&jobs, &json!({ "job_id": id })).await?;
+            let detail: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            let _ = store
+                .audit()
+                .append(
+                    core_store::Actor::Gui,
+                    Some(&sid),
+                    "mcp_job_stop",
+                    &json!({ "detail": detail }),
+                )
+                .await;
+        }
+        "terminal" => {
+            crate::mcp_terminal::close_terminal(&terms, &hub, store, &id, core_store::Actor::Gui)
+                .await?;
+        }
+        other => return Err(format!("未知活动类型：{other}")),
+    }
+    hub.activity_changed();
+    Ok(())
 }
 
 /// 前端为 agent 开的标签已连上（tabId）或失败（error）；返回 false = 请求已超时/取消
@@ -543,6 +708,31 @@ mod tests {
         // 已消费/未知审批项不能借机记规则
         assert!(!hub.allow_always(&id));
         assert!(!hub.allow_always("nope"));
+    }
+
+    #[tokio::test]
+    async fn exec_ticket_registers_cancels_and_unregisters_on_drop() {
+        let (hub, seen) = hub_with_sink();
+        let t = hub.track_exec("s1", "ssh_exec", "sleep 100");
+        let snap = hub.exec_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0]["sessionId"], "s1");
+        assert_eq!(snap[0]["command"], "sleep 100");
+        let id = snap[0]["execId"].as_str().unwrap().to_string();
+        // 先取消、后等待也能收到（命令可能还在排队拿配额）
+        assert_eq!(hub.cancel_exec(&id).as_deref(), Some("s1"));
+        tokio::time::timeout(Duration::from_secs(1), t.cancelled())
+            .await
+            .expect("取消信号应立刻送达");
+        drop(t);
+        assert!(hub.exec_snapshot().is_empty(), "drop 即注销");
+        assert!(hub.cancel_exec(&id).is_none(), "已结束的命令不能再停止");
+        let hints = seen
+            .lock()
+            .iter()
+            .filter(|f| f["type"] == "ai_activity")
+            .count();
+        assert_eq!(hints, 2, "登记与注销各推一次提示帧");
     }
 
     #[test]

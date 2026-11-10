@@ -3,11 +3,12 @@ import { isLocalTarget, useAppStore } from '../state/app-store';
 import { initBroadcastReceiver } from '../term/broadcast';
 import { keymapFromSettings } from '../term/keymap';
 import { useT } from '../i18n';
+import { useAiActivity } from '../state/ai-activity';
 
 /**
  * 右上角统一工具条（UX 批次 · 条目 8/13）：收纳原散落在窗口头部与 TabBar 的
  * 功能图标，统一尺寸/hover/激活态/tooltip（含快捷键提示）；活跃面板对应图标高亮。
- * 顺序约定：面板（SFTP/监控/隧道/广播/传输中心）→ 设置。
+ * 顺序约定：面板（SFTP/监控/隧道/广播/传输中心/AI 活动）→ 设置。
  * 分屏入口在右键菜单与快捷键（keymap splitRow/splitCol），工具条不再直挂。
  *
  * SFTP/监控/隧道/传输中心四个按钮统一走底部 dock（app-store dockTab/toggleDock）。
@@ -24,6 +25,10 @@ export function AppToolbar() {
   const toggleBroadcast = useAppStore((s) => s.toggleBroadcast);
   const transferActive = useAppStore((s) => s.transferActive);
   const settings = useAppStore((s) => s.settings);
+  const aiPanelOpen = useAiActivity((s) => s.panelOpen);
+  const toggleAiPanel = useAiActivity((s) => s.togglePanel);
+  const aiRunning = useAiActivity((s) => s.execs.length + s.jobs.length);
+  const aiPending = useAppStore((s) => s.pendingApprovals.length);
 
   // 广播接收端注册（幂等；detached 子窗口各跑一份 App 同样生效）
   useEffect(() => {
@@ -87,6 +92,15 @@ export function AppToolbar() {
         onClick={() => toggleDock('transfer')}
       >
         ⇅
+      </ToolBtn>
+      <ToolBtn
+        label={t('chrome.aiActivityLabel')}
+        tooltip={t('chrome.tipAiActivity', { running: aiRunning, pending: aiPending })}
+        active={aiPanelOpen}
+        badge={aiPending + aiRunning}
+        onClick={toggleAiPanel}
+      >
+        <span className="text-[11px] font-semibold">AI</span>
       </ToolBtn>
 
       <Divider />

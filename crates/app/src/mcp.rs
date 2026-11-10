@@ -1270,7 +1270,11 @@ async fn call_tool(st: &ServerState, name: &str, args: &Value) -> Value {
                 mgr: &st.term_mgr,
                 recs: &st.recs,
             };
-            match crate::mcp_terminal::terminal_tool(&ctx, n, args).await {
+            let res = crate::mcp_terminal::terminal_tool(&ctx, n, args).await;
+            if matches!(n, "terminal_open" | "terminal_close") {
+                st.ui.activity_changed();
+            }
+            match res {
                 Ok(text) => ok_content(text),
                 Err(e) => err_content(e),
             }
@@ -1426,6 +1430,8 @@ async fn run_exec(
 ) -> Result<Value, String> {
     let store = &st.store;
     tracing::info!(session_id, timeout_ms, action, "MCP 命令开始执行");
+    let tool = action.strip_prefix("mcp_").unwrap_or(action);
+    let ticket = st.ui.track_exec(session_id, tool, command);
     let mirror = exec_mirror(st, session_id, action, command).await;
     let started = Instant::now();
     let run = async {
@@ -1433,13 +1439,21 @@ async fn run_exec(
         let _permit = ctx.acquire_mcp().await?;
         ssh_exec_inner(ctx, command.to_string(), strip, mirror.as_ref()).await
     };
-    let result = tokio::time::timeout(Duration::from_millis(timeout_ms), run).await;
+    // 超时与用户停止都丢弃 run：exec 通道随之关闭（同一 Transport 上其他命令不受影响）
+    let result = tokio::select! {
+        r = tokio::time::timeout(Duration::from_millis(timeout_ms), run) => {
+            r.map_err(|_| ExecStop::Timeout)
+        }
+        () = ticket.cancelled() => Err(ExecStop::Cancelled),
+    };
+    drop(ticket);
     let elapsed = started.elapsed().as_millis() as u64;
     if let Some(m) = mirror {
         match &result {
             Ok(Ok(body)) => m.finish("ok", body["exitCode"].as_u64(), elapsed, None),
             Ok(Err(e)) => m.finish("error", None, elapsed, Some(e)),
-            Err(_) => m.finish("timeout", None, elapsed, None),
+            Err(ExecStop::Timeout) => m.finish("timeout", None, elapsed, None),
+            Err(ExecStop::Cancelled) => m.finish("cancelled", None, elapsed, None),
         }
     }
 
@@ -1449,7 +1463,8 @@ async fn run_exec(
             json!({ "exitCode": body["exitCode"], "truncated": body["truncated"] }),
         ),
         Ok(Err(e)) => ("error", json!({ "error": e })),
-        Err(_) => ("timeout", json!({ "timeoutMs": timeout_ms })),
+        Err(ExecStop::Timeout) => ("timeout", json!({ "timeoutMs": timeout_ms })),
+        Err(ExecStop::Cancelled) => ("cancelled", json!({ "by": "user" })),
     };
     mcp_audit(
         st,
@@ -1464,8 +1479,17 @@ async fn run_exec(
             Ok(body)
         }
         Ok(Err(e)) => Err(e),
-        Err(_) => Err(format!("命令执行超时（{timeout_ms} ms），连接已断开")),
+        Err(ExecStop::Timeout) => Err(format!("命令执行超时（{timeout_ms} ms），连接已断开")),
+        Err(ExecStop::Cancelled) => Err(format!(
+            "用户在 mySSH 中停止了这条命令（已运行 {elapsed} ms），通道已关闭。不要自动重试，先询问用户"
+        )),
     }
+}
+
+/// 一次性命令未正常返回的原因
+enum ExecStop {
+    Timeout,
+    Cancelled,
 }
 
 /// 窗口在线且未关闭镜像（mcp.exec_mirror，缺省开启）时，为本次执行建只读镜像
@@ -1658,6 +1682,7 @@ async fn job_tool(st: &ServerState, name: &str, args: &Value) -> Result<String, 
                 Err(e) => json!({ "command": command, "result": "error", "error": e }),
             };
             mcp_audit(st, session_id, "mcp_job_start", &detail).await;
+            st.ui.activity_changed();
             res
         }
         "job_read" => crate::mcp_jobs::job_read(&st.jobs, args).await,
@@ -1671,6 +1696,7 @@ async fn job_tool(st: &ServerState, name: &str, args: &Value) -> Result<String, 
             ) {
                 mcp_audit(st, &sid, "mcp_job_stop", &json!({ "detail": body })).await;
             }
+            st.ui.activity_changed();
             res
         }
         "job_list" => Ok(crate::mcp_jobs::job_list(&st.jobs, args)),
@@ -2711,7 +2737,13 @@ mod tests {
         assert!(run_exec(&st, "s1", "uptime", 3000, true, "mcp_ssh_exec")
             .await
             .is_err());
-        let got = frames.lock().clone();
+        let all = frames.lock().clone();
+        let activity = all.iter().filter(|f| f["type"] == "ai_activity").count();
+        assert_eq!(activity, 2, "登记与注销各提示一次活动变化：{all:?}");
+        let got: Vec<Value> = all
+            .into_iter()
+            .filter(|f| f["type"] != "ai_activity")
+            .collect();
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0]["type"], "exec_start");
         assert_eq!(got[0]["tool"], "ssh_exec");
@@ -2729,7 +2761,10 @@ mod tests {
             .unwrap();
         frames.lock().clear();
         let _ = run_exec(&st, "s1", "uptime", 3000, true, "mcp_ssh_exec").await;
-        assert!(frames.lock().is_empty(), "设置关闭后不镜像");
+        assert!(
+            frames.lock().iter().all(|f| f["type"] == "ai_activity"),
+            "设置关闭后不镜像（活动面板仍登记）"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
