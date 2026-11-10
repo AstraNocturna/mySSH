@@ -104,7 +104,7 @@ AI 能做什么由你决定：
 
 ## 从源码构建
 
-需要 Rust stable、Node.js 20+、Windows 10/11（WebView2 Runtime）。
+需要 rustup（Rust 版本由仓库根目录的 `rust-toolchain.toml` 固定，首次编译时自动安装）、Node.js 20+、Windows 10/11（WebView2 Runtime）。
 
 ```bash
 # 前端
