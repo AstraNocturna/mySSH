@@ -80,10 +80,11 @@ export const zhDialogs = {
   'dialogs.approvalDeny': '拒绝（{sec} 秒）',
   'dialogs.approvalAllow': '允许执行一次',
   'dialogs.approvalAllowNow': '立即执行',
-  'dialogs.approvalAlways': '自动执行（本会话此命令）',
+  'dialogs.approvalAlways': '自动执行（本会话后续命令）',
   'dialogs.approvalAutoIn': '{sec} 秒后自动执行',
+  'dialogs.approvalAutoBlocked': '（含高危命令，需手动确认）',
   'dialogs.approvalAlwaysHint':
-    '勾选后 3 秒自动执行并记住：本会话以后同一命令仍会弹框，但自动勾选并倒计时执行；取消勾选即忘掉。重启 mySSH 后失效',
+    '勾选后 3 秒自动执行；本会话后续需要确认的命令仍会弹框，但自动勾选并倒计时 3 秒执行（高危命令除外）。取消勾选即关闭；AI 客户端断开后失效',
   'dialogs.approvalPurpose': 'AI 自述用途（未经验证，以实际命令为准）',
   'dialogs.approvalSummary': '命令说明',
   'dialogs.approvalThen': '，然后',

@@ -86,8 +86,10 @@ export interface McpApprovalRequest {
   parts?: ApprovalPart[];
   /** agent 自述的命令用途（未经验证，仅展示） */
   purpose?: string | null;
-  /** 用户此前勾过「自动执行」：弹框后预勾选并倒计时自动批准 */
+  /** 该会话已开启「自动执行」：弹框后预勾选并倒计时自动批准 */
   remembered?: boolean;
+  /** 含高危（黑名单）命令：不能自动执行，必须手动确认 */
+  highRisk?: boolean;
   /** 前端收到时刻（Date.now），用于倒计时与到期自动关闭 */
   receivedAt: number;
   /** 「自动执行」已勾选：到这个时刻（Date.now）自动批准并记住规则 */
@@ -270,9 +272,9 @@ interface AppStore {
   /** 订阅 MCP 前端交互事件（App 挂载时调用一次） */
   subscribeMcpUi(): void;
   /** 应答审批并出队；到期未答的由弹窗以 allow=false 出队 */
-  /** always：「自动执行」勾选状态。批准且勾选 → 记住规则（后端内存，应用重启失效）；否则忘掉 */
+  /** always：「自动执行」勾选状态。批准且勾选 → 本会话开启自动执行（AI 客户端断开失效）；拒绝不改规则 */
   answerApproval(id: string, allow: boolean, always?: boolean): void;
-  /** 勾选/取消「自动执行」：勾选开始 3 秒倒计时；取消即停止倒计时并忘掉已记住的规则 */
+  /** 勾选/取消「自动执行」：勾选开始 3 秒倒计时；取消即停止本会话所有倒计时并关掉自动执行 */
   setApprovalAuto(id: string, on: boolean): void;
   /** 空闲 AI 客户端确认队列（逐个弹框） */
   aiIdlePrompts: AiIdlePrompt[];
@@ -785,27 +787,44 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     answerApproval: (id, allow, always = false) => {
-      void invoke('mcp_approve', { id, allow, always }).catch(() => undefined);
-      set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) }));
+      // 拒绝不改「自动执行」规则（只有勾选框能开关）；批准时按勾选状态开启或关闭
+      void invoke('mcp_approve', { id, allow, always: allow ? always : null }).catch(
+        () => undefined,
+      );
+      set((s) => {
+        const a = s.pendingApprovals.find((x) => x.id === id);
+        const on = allow && always && a !== undefined;
+        return {
+          pendingApprovals: s.pendingApprovals
+            .filter((x) => x.id !== id)
+            // 刚开启自动执行：同会话里已在排队的（高危除外）也勾上并开始倒计时
+            .map((x) =>
+              on && x.sessionId === a?.sessionId && !x.highRisk && x.autoAt === undefined
+                ? { ...x, remembered: true, autoAt: Date.now() + APPROVAL_AUTO_RUN_MS }
+                : x,
+            ),
+        };
+      });
     },
 
     setApprovalAuto: (id, on) => {
       const a = get().pendingApprovals.find((x) => x.id === id);
-      if (!a) return;
-      if (!on && a.remembered) void invoke('mcp_forget_always', { id }).catch(() => undefined);
+      if (!a || (on && a.highRisk)) return;
+      // 取消勾选 = 关掉本会话的自动执行：同会话排队项一并停止倒计时
+      const off = (x: McpApprovalRequest) => !on && x.sessionId === a.sessionId;
+      get()
+        .pendingApprovals.filter((x) => off(x) && x.remembered)
+        .forEach((x) => void invoke('mcp_forget_always', { id: x.id }).catch(() => undefined));
       set((s) => ({
         pendingApprovals: s.pendingApprovals.map((x) =>
-          x.id === id
-            ? {
-                ...x,
-                autoAt: on ? Date.now() + APPROVAL_AUTO_RUN_MS : undefined,
-                remembered: on && x.remembered,
-              }
-            : x,
+          x.id === id && on
+            ? { ...x, autoAt: Date.now() + APPROVAL_AUTO_RUN_MS }
+            : off(x)
+              ? { ...x, autoAt: undefined, remembered: false }
+              : x,
         ),
       }));
     },
-
     answerAiIdle: (clientId, release) => {
       void invoke('mcp_client_idle_answer', { clientId, releaseIt: release }).catch(
         () => undefined,

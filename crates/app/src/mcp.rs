@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use core_policy::{PolicyEngine, RateLimiter, Verdict};
+use core_policy::{PartRisk, PolicyEngine, RateLimiter, Verdict};
 use core_sftp::OnExists;
 use core_store::Store;
 
@@ -1884,9 +1884,12 @@ async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: As
     let Some(rec) = rec else {
         return Confirm::Denied("命令需人工确认，且会话不存在".into());
     };
-    let parts: Vec<Value> = st
-        .policy
-        .explain(command)
+    let explained = st.policy.explain(command);
+    // 高危命令即使会话开了「自动执行」也要手动确认
+    let high_risk = explained.iter().any(|p| {
+        p.risk == PartRisk::Blacklist || p.cmds.iter().any(|c| c.risk == PartRisk::Blacklist)
+    });
+    let parts: Vec<Value> = explained
         .into_iter()
         .map(|p| {
             json!({
@@ -1916,8 +1919,9 @@ async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: As
         "production": eff.production,
         "parts": parts,
         "purpose": purpose,
-        // 用户此前勾过「自动执行」：前端弹框后倒计时自动批准，可取消
-        "remembered": st.ui.is_always_allowed(session_id, command),
+        // 该客户端已在此会话开启「自动执行」：前端弹框后自动勾选、倒计时批准，可取消
+        "remembered": !high_risk && st.ui.is_auto_run(session_id),
+        "highRisk": high_risk,
     });
     let id = match st.ui.request(session_id, command, event) {
         Ok(id) => id,
@@ -1933,7 +1937,7 @@ async fn confirm_exec(st: &ServerState, session_id: &str, command: &str, ask: As
                     "command": command,
                     "result": "approved",
                     "approvalId": id,
-                    "always": st.ui.is_always_allowed(session_id, command),
+                    "always": st.ui.is_auto_run(session_id),
                 }),
             )
             .await;
@@ -2755,7 +2759,7 @@ mod tests {
                 ])
             );
             if always {
-                // 同会话同命令再调用：仍弹窗，但带 remembered 标记（前端预勾选并倒计时自动执行）
+                // 开启自动执行后再调用：仍弹窗，但带 remembered 标记（前端预勾选并倒计时自动执行）
                 let mut waited = tokio::time::timeout(
                     Duration::from_millis(100),
                     ssh_exec_tool(&st, &args("prod")),
@@ -2771,9 +2775,15 @@ mod tests {
                 assert_eq!(asks.len(), 2, "记住后仍弹审批");
                 assert_eq!(asks[0]["remembered"], false);
                 assert_eq!(asks[1]["remembered"], true);
-                // 其他命令不带 remembered
+                // 本会话的其他命令也自动执行
                 let mut other = args("prod");
                 other["command"] = json!("touch /tmp/y");
+                waited =
+                    tokio::time::timeout(Duration::from_millis(100), ssh_exec_tool(&st, &other))
+                        .await;
+                assert!(waited.is_err(), "未决定的审批不应返回");
+                // 高危命令除外：仍需手动确认
+                other["command"] = json!("rm -rf /tmp/z");
                 waited =
                     tokio::time::timeout(Duration::from_millis(100), ssh_exec_tool(&st, &other))
                         .await;
@@ -2784,8 +2794,11 @@ mod tests {
                     .filter(|f| f["type"] == "approval_request")
                     .cloned()
                     .collect();
-                assert_eq!(asks.len(), 3);
-                assert_eq!(asks[2]["remembered"], false);
+                assert_eq!(asks.len(), 4);
+                assert_eq!(asks[2]["remembered"], true);
+                assert_eq!(asks[3]["remembered"], false);
+                assert_eq!(asks[3]["highRisk"], true);
+                assert_eq!(asks[2]["highRisk"], false);
             }
             let e = r.unwrap_err();
             if allow {

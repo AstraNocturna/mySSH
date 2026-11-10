@@ -560,45 +560,45 @@ describe('MCP agent 终端标签', () => {
     useAppStore.setState({ pendingApprovals: [] });
   });
 
-  it('「自动执行」：记住过的命令到达即倒计时；取消勾选停止并忘掉规则；勾选后批准带 always', () => {
+  it('「自动执行」按会话生效：开启后同会话排队项一并倒计时（高危除外）；取消勾选整会话关闭；拒绝不改规则', () => {
     const t0 = Date.now();
-    push({
-      type: 'approval_request',
-      id: 'ap1',
-      sessionId: 's1',
-      command: 'df -h',
-      expiresInMs: 60000,
-      remembered: true,
-    });
-    push({
-      type: 'approval_request',
-      id: 'ap2',
-      sessionId: 's1',
-      command: 'ls',
-      expiresInMs: 60000,
-    });
-    const [a1, a2] = state().pendingApprovals;
-    expect(a1.autoAt).toBeGreaterThanOrEqual(t0 + APPROVAL_AUTO_RUN_MS);
-    expect(a2.autoAt).toBeUndefined();
+    const req = (id: string, sessionId: string, extra: Record<string, unknown> = {}) =>
+      push({ type: 'approval_request', id, sessionId, command: id, expiresInMs: 60000, ...extra });
+    req('ap1', 's1');
+    req('ap2', 's1');
+    req('ap3', 's1', { highRisk: true });
+    req('ap4', 's2');
+    expect(state().pendingApprovals.every((a) => a.autoAt === undefined)).toBe(true);
+
+    // 高危项不能勾选
+    state().setApprovalAuto('ap3', true);
+    expect(state().pendingApprovals[2].autoAt).toBeUndefined();
 
     vi.mocked(invoke).mockClear();
-    state().setApprovalAuto('ap1', false);
-    expect(invoke).toHaveBeenCalledWith('mcp_forget_always', { id: 'ap1' });
-    expect(state().pendingApprovals[0]).toMatchObject({ autoAt: undefined, remembered: false });
-    // 未记住过的项取消勾选不必通知后端
+    state().answerApproval('ap1', true, true);
+    expect(invoke).toHaveBeenCalledWith('mcp_approve', { id: 'ap1', allow: true, always: true });
+    const by = (id: string) => state().pendingApprovals.find((a) => a.id === id);
+    expect(by('ap2')).toMatchObject({ remembered: true });
+    expect(by('ap2')?.autoAt).toBeGreaterThanOrEqual(t0 + APPROVAL_AUTO_RUN_MS);
+    expect(by('ap3')?.autoAt).toBeUndefined();
+    expect(by('ap4')?.autoAt).toBeUndefined();
+
+    // 后端标记已开启的新请求到达即倒计时
+    req('ap5', 's1', { remembered: true });
+    expect(by('ap5')?.autoAt).toBeGreaterThan(0);
+
+    // 拒绝某一条不改规则
     vi.mocked(invoke).mockClear();
-    state().setApprovalAuto('ap2', true);
+    state().answerApproval('ap5', false);
+    expect(invoke).toHaveBeenCalledWith('mcp_approve', { id: 'ap5', allow: false, always: null });
+    expect(by('ap2')?.autoAt).toBeGreaterThan(0);
+
+    // 取消勾选：整会话停止倒计时并通知后端关闭
     state().setApprovalAuto('ap2', false);
-    state().setApprovalAuto('ap2', true);
-    expect(invoke).not.toHaveBeenCalled();
-    expect(state().pendingApprovals[1].autoAt).toBeGreaterThan(0);
-
-    state().answerApproval('ap2', true, true);
-    expect(invoke).toHaveBeenCalledWith('mcp_approve', { id: 'ap2', allow: true, always: true });
-    expect(state().pendingApprovals.map((a) => a.id)).toEqual(['ap1']);
+    expect(invoke).toHaveBeenCalledWith('mcp_forget_always', { id: 'ap2' });
+    expect(by('ap2')).toMatchObject({ autoAt: undefined, remembered: false });
     useAppStore.setState({ pendingApprovals: [] });
   });
-
   it('会话不存在或为本地会话：立即回报失败，不开标签', () => {
     useAppStore.setState({ sessions: [{ ...rec, id: 'loc', kind: 'local' }] });
     push({ type: 'agent_terminal_open', requestId: 'r2', sessionId: 'missing' });

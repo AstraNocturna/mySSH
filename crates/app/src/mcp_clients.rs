@@ -300,6 +300,7 @@ pub(crate) fn owned_counts(ctx: &ReleaseCtx<'_>, id: &str) -> Value {
 pub(crate) async fn release(ctx: &ReleaseCtx<'_>, id: &str, reason: &str) -> Value {
     let (name, mirrors) = ctx.clients.remove(id);
     let approvals = ctx.ui.drop_owned_approvals(id);
+    ctx.ui.forget_owner_rules(id);
     let execs = ctx.ui.cancel_owned_execs(id);
     let jobs = ctx.jobs.stop_owned(id);
     let mut tabs = ctx.terms.close_owned(Some(id)).await;
