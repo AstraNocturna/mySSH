@@ -35,7 +35,7 @@ export function AiStatusBadge({
       {status.pending > 0 && (
         <button
           type="button"
-          className="shrink-0 rounded bg-amber-600 px-1 text-[10px] leading-4 text-white hover:bg-amber-500"
+          className="shrink-0 rounded bg-amber-600 px-1.5 text-[11px] leading-4 text-white hover:bg-amber-500"
           title={t('chrome.aiPendingBadgeTitle')}
           onClick={openPending}
         >
@@ -44,7 +44,7 @@ export function AiStatusBadge({
       )}
       {status.running > 0 && (
         <span
-          className="shrink-0 rounded bg-purple-700/80 px-1 text-[10px] leading-4 text-white"
+          className="shrink-0 rounded bg-purple-700/80 px-1.5 text-[11px] leading-4 text-white"
           title={t('chrome.aiRunningBadgeTitle')}
         >
           {t('chrome.aiRunningBadge', { count: status.running })}

@@ -273,6 +273,11 @@ export const zhDialogs = {
   'dialogs.downloadDirHint':
     '设置后，SFTP 下载按钮与右键下载固定落到该目录；留空则跟随本地栏当前目录。',
   'dialogs.browse': '浏览…',
+  'dialogs.portInvalid': '端口须为 1–65535',
+  'dialogs.fillRequired': '请先填写主机、端口和用户名',
+  'dialogs.advancedOptions': '高级选项',
+  'dialogs.showPassword': '显示密码',
+  'dialogs.hidePassword': '隐藏密码',
   'dialogs.clearDownloadDir': '清除',
   'dialogs.browseFailed': '打开目录选择框失败：{error}',
   'dialogs.retentionSection': '历史记录保留',

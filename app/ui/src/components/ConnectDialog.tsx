@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../state/app-store';
 import { TunnelEditor } from './TunnelEditor';
 import { Dialog } from './Dialog';
+import { Icon } from './Icon';
 import { ConfirmDialog } from './ConfirmDialog';
 import { MCP_LEVELS, MCP_PERM_GROUPS, setPermMode } from './mcp-options';
 import {
@@ -60,6 +62,75 @@ const PRESET_COLORS = [
   '#30a46c',
 ];
 
+const inputCls =
+  'h-9 w-full rounded-md border border-neutral-700 bg-neutral-800 px-3 text-sm text-neutral-100 outline-none placeholder:text-neutral-500 focus:border-blue-600';
+const SWATCH_ACTIVE = 'ring-2 ring-neutral-200 ring-offset-2 ring-offset-neutral-900';
+
+/** 表单项：标签 + 必填星号 + 内联错误；包 label 让点击标签聚焦控件 */
+function Field({
+  label,
+  required,
+  error,
+  className = '',
+  children,
+}: {
+  label: string;
+  required?: boolean;
+  error?: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className={`block ${className}`}>
+      <span className="mb-1.5 block text-xs font-medium text-neutral-400">
+        {label}
+        {required && <span className="ml-0.5 text-red-400">*</span>}
+      </span>
+      {children}
+      {error && <span className="mt-1 block text-xs text-red-400">{error}</span>}
+    </label>
+  );
+}
+
+/** 密码框 + 显示/隐藏切换（切换按钮不进 Tab 顺序，避免打断表单键盘流） */
+function PasswordInput({
+  value,
+  onChange,
+  autoComplete = 'off',
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  autoComplete?: string;
+  placeholder?: string;
+}) {
+  const t = useT();
+  const [shown, setShown] = useState(false);
+  return (
+    <div className="relative">
+      <input
+        className={`${inputCls} pr-10`}
+        type={shown ? 'text' : 'password'}
+        value={value}
+        autoComplete={autoComplete}
+        spellCheck={false}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        className="absolute top-1/2 right-1 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100"
+        title={shown ? t('dialogs.hidePassword') : t('dialogs.showPassword')}
+        aria-label={shown ? t('dialogs.hidePassword') : t('dialogs.showPassword')}
+        onClick={() => setShown((v) => !v)}
+      >
+        <Icon name={shown ? 'eyeOff' : 'eye'} size={16} />
+      </button>
+    </div>
+  );
+}
+
 /** 新建/编辑会话对话框。key=id 重挂载重置表单（editing 预填）。 */
 export function ConnectDialog() {
   const show = useAppStore((s) => s.showConnect);
@@ -86,6 +157,7 @@ function ConnectForm({
   const close = useAppStore((s) => s.closeConnect);
   const connect = useAppStore((s) => s.connect);
   const connectBySession = useAppStore((s) => s.connectBySession);
+  const notify = useAppStore((s) => s.notify);
   const loadSessions = useAppStore((s) => s.loadSessions);
   const t = useT();
 
@@ -100,8 +172,11 @@ function ConnectForm({
   const [nameTouched, setNameTouched] = useState(false);
   const [color, setColor] = useState<string | null>(initial?.color ?? null);
   const [encoding, setEncoding] = useState(initial?.encoding ?? 'utf-8');
-  const [host, setHost] = useState(initial?.host ?? '127.0.0.1');
-  const [port, setPort] = useState(initial?.port ?? 22);
+  const [host, setHost] = useState(initial?.host ?? '');
+  // 端口用文本态：数字态下清空会被回填 22，无法重新输入
+  const [portText, setPortText] = useState(String(initial?.port || 22));
+  const port = Number(portText);
+  const portOk = Number.isInteger(port) && port >= 1 && port <= 65535;
   const [user, setUser] = useState(initial?.username ?? '');
   const [kind, setKind] = useState<AuthKind>(
     initial?.authType === 'publickey'
@@ -279,58 +354,77 @@ function ConnectForm({
     }
   };
 
-  const input = 'w-full rounded border border-neutral-700 bg-neutral-800 px-2 py-1';
+  const sshReady = host.trim() !== '' && user.trim() !== '' && portOk;
+  const canSubmit = sessKind === 'local' || sshReady;
+  const notReadyHint = sessKind === 'ssh' && !sshReady ? t('dialogs.fillRequired') : undefined;
+  const advancedHasValue = suUser.trim() !== '' || loginMacro.trim() !== '' || encoding !== 'utf-8';
+
+  const pickKeyFile = async () => {
+    try {
+      const picked = await open({ multiple: false, directory: false });
+      if (typeof picked === 'string') setKeyPath(picked);
+    } catch (e) {
+      notify(t('dialogs.browseFailed', { error: String(e) }), 'error');
+    }
+  };
+
+  const title = initial
+    ? t('dialogs.titleEdit')
+    : sessKind === 'local'
+      ? t('dialogs.titleNewLocal')
+      : t('dialogs.titleNewSsh');
+  const ghostBtn =
+    'h-9 rounded-md px-4 text-sm text-neutral-300 hover:bg-neutral-800 disabled:opacity-50';
+  const outlineBtn =
+    'h-9 rounded-md border border-neutral-700 px-4 text-sm text-neutral-200 hover:bg-neutral-800 disabled:opacity-50';
 
   return (
     <Dialog
-      title={
-        initial
-          ? t('dialogs.titleEdit')
-          : sessKind === 'local'
-            ? t('dialogs.titleNewLocal')
-            : t('dialogs.titleNewSsh')
-      }
+      title={title}
       onClose={close}
       closeOnBackdrop={false}
       backdropClass="z-10"
-      panelClass="w-[32rem] rounded-lg border border-neutral-700 bg-neutral-900 p-4 text-sm text-neutral-200 shadow-xl"
+      panelClass="myssh-tool flex max-h-[90vh] w-[40rem] max-w-[94vw] flex-col overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 text-sm text-neutral-200 shadow-xl"
     >
-      <h2 className="mb-2 text-base font-semibold">
-        {initial
-          ? t('dialogs.titleEdit')
-          : sessKind === 'local'
-            ? t('dialogs.titleNewLocal')
-            : t('dialogs.titleNewSsh')}
-      </h2>
-      {/* 会话类型（批次十四）：本地终端 = 本机 PTY，适合跑 AI agent 等命令行工具 */}
-      {!initial && (
-        <div className="mb-3 flex gap-1">
-          {(
-            [
-              ['ssh', 'dialogs.kindSsh'],
-              ['local', 'dialogs.localTerminal'],
-            ] as const
-          ).map(([k, label]) => (
-            <button
-              key={k}
-              className={`rounded px-2.5 py-1 text-xs ${
-                sessKind === k
-                  ? 'bg-blue-600 text-white'
-                  : 'border border-neutral-700 text-neutral-400 hover:text-neutral-200'
-              }`}
-              onClick={() => {
-                setSessKind(k);
-                setTab('basic');
-              }}
-            >
-              {t(label)}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="flex items-center justify-between px-6 pt-5 pb-3">
+        <h2 className="text-lg font-semibold text-neutral-100">{title}</h2>
+        {/* 会话类型（批次十四）：本地终端 = 本机 PTY，适合跑 AI agent 等命令行工具；创建后锁定 */}
+        {!initial && (
+          <div className="inline-flex rounded-lg bg-neutral-800 p-1" role="group">
+            {(
+              [
+                ['ssh', 'dialogs.kindSsh'],
+                ['local', 'dialogs.localTerminal'],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                aria-pressed={sessKind === k}
+                className={`h-8 rounded-md px-4 ${
+                  sessKind === k
+                    ? 'bg-blue-600 text-white'
+                    : 'text-neutral-400 hover:text-neutral-100'
+                }`}
+                onClick={() => {
+                  setSessKind(k);
+                  setTab('basic');
+                  if (k === 'local') {
+                    if (!initial && !nameTouched) setName('');
+                  } else {
+                    followName(user, host);
+                  }
+                }}
+              >
+                {t(label)}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* §9.1 双入口之一：服务器编辑器标签页 */}
-      <div className="mb-3 flex gap-1 border-b border-neutral-800" role="tablist">
+      <div className="flex gap-1 border-b border-neutral-800 px-6" role="tablist">
         {(Object.keys(TAB_LABEL) as EditorTab[])
           .filter((tabKey) => sessKind === 'ssh' || tabKey === 'basic')
           .map((tabKey) => (
@@ -338,10 +432,10 @@ function ConnectForm({
               key={tabKey}
               role="tab"
               aria-selected={tab === tabKey}
-              className={`px-2.5 py-1 text-xs ${
+              className={`h-10 border-b-2 px-4 ${
                 tab === tabKey
-                  ? 'border-b-2 border-blue-500 text-neutral-100'
-                  : 'text-neutral-500 hover:text-neutral-300'
+                  ? 'border-blue-500 text-neutral-100'
+                  : 'border-transparent text-neutral-400 hover:text-neutral-200'
               }`}
               onClick={() => setTab(tabKey)}
             >
@@ -350,154 +444,54 @@ function ConnectForm({
           ))}
       </div>
 
-      <div className="flex min-h-56 flex-col gap-2">
+      <div
+        className="flex min-h-72 flex-1 flex-col gap-4 overflow-y-auto px-6 py-5"
+        onKeyDown={(e) => {
+          // 表单没有 <form>：输入框里按 Enter = 主操作（保存并连接/连接）；Dialog 基座不劫持输入控件的 Enter
+          if (e.key !== 'Enter' || tab !== 'basic' || busy || !canSubmit) return;
+          const el = e.target;
+          if (el instanceof HTMLInputElement && el.type !== 'checkbox' && el.type !== 'color') {
+            e.preventDefault();
+            void submit(true);
+          }
+        }}
+      >
         {tab === 'basic' && (
           <>
-            {(save || sessKind === 'local') && (
-              <label>
-                <span className="mb-0.5 block text-xs text-neutral-400">
-                  {t('dialogs.labelName')}
-                </span>
-                <input
-                  className={input}
-                  value={name}
-                  onChange={(e) => {
-                    setNameTouched(true);
-                    setName(e.target.value);
-                  }}
-                  placeholder={t('dialogs.namePlaceholder')}
-                />
-              </label>
-            )}
-            {(save || sessKind === 'local') && (
-              <div>
-                <span className="mb-0.5 block text-xs text-neutral-400">
-                  {t('dialogs.labelColor')}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    title={t('dialogs.colorNone')}
-                    aria-label={t('dialogs.colorNoneAria')}
-                    className={`flex h-5 w-5 items-center justify-center rounded-full border border-neutral-600 text-[10px] leading-none text-neutral-500 ${
-                      color === null
-                        ? 'ring-2 ring-neutral-200 ring-offset-1 ring-offset-neutral-900'
-                        : ''
-                    }`}
-                    onClick={() => setColor(null)}
-                  >
-                    ∅
-                  </button>
-                  {PRESET_COLORS.map((c) => (
-                    <button
-                      key={c}
-                      type="button"
-                      title={c}
-                      aria-label={t('dialogs.colorValueAria', { color: c })}
-                      style={{ backgroundColor: c }}
-                      className={`h-5 w-5 rounded-full ${
-                        color === c
-                          ? 'ring-2 ring-neutral-200 ring-offset-1 ring-offset-neutral-900'
-                          : ''
-                      }`}
-                      onClick={() => setColor(c)}
-                    />
-                  ))}
-                  {/* 调色板任意颜色 */}
-                  <input
-                    type="color"
-                    title={t('dialogs.customColor')}
-                    aria-label={t('dialogs.customColor')}
-                    value={color ?? '#3e63dd'}
-                    onChange={(e) => setColor(e.target.value)}
-                    className={`h-5 w-7 cursor-pointer rounded border border-neutral-600 bg-transparent p-0 ${
-                      color !== null && !PRESET_COLORS.includes(color)
-                        ? 'ring-2 ring-neutral-200 ring-offset-1 ring-offset-neutral-900'
-                        : ''
-                    }`}
-                  />
-                </div>
-              </div>
-            )}
-            {sessKind === 'local' && (
-              <>
-                <label>
-                  <span className="mb-0.5 block text-xs text-neutral-400">
-                    {t('dialogs.workdirLabel')}
-                  </span>
-                  <input
-                    className={input}
-                    value={workdir}
-                    spellCheck={false}
-                    onChange={(e) => setWorkdir(e.target.value)}
-                    placeholder="D:\projects\my-app"
-                  />
-                </label>
-                <label>
-                  <span className="mb-0.5 block text-xs text-neutral-400">Shell</span>
-                  <select
-                    className={input}
-                    value={shell}
-                    onChange={(e) => setShell(e.target.value)}
-                  >
-                    <option value="">{t('dialogs.shellAuto')}</option>
-                    <option value="pwsh">{t('dialogs.shellPwsh')}</option>
-                    <option value="powershell">Windows PowerShell</option>
-                    <option value="cmd">{t('dialogs.shellCmd')}</option>
-                  </select>
-                </label>
-                <label>
-                  <span className="mb-0.5 block text-xs text-neutral-400">
-                    {t('dialogs.commandLabel')}
-                  </span>
-                  <input
-                    className={input}
-                    value={command}
-                    spellCheck={false}
-                    onChange={(e) => setCommand(e.target.value)}
-                    placeholder={t('dialogs.commandPlaceholder')}
-                  />
-                </label>
-                <p className="text-xs text-neutral-500">{t('dialogs.localNote')}</p>
-              </>
-            )}
             {sessKind === 'ssh' && (
               <>
-                <div className="flex gap-2">
-                  <label className="flex-1">
-                    <span className="mb-0.5 block text-xs text-neutral-400">
-                      {t('dialogs.host')}
-                    </span>
+                <div className="flex gap-3">
+                  <Field label={t('dialogs.host')} required className="flex-1">
                     <input
-                      className={input}
+                      className={inputCls}
                       value={host}
                       autoComplete="off"
                       spellCheck={false}
+                      placeholder={t('dialogs.hostPlaceholder')}
                       onChange={(e) => {
                         setHost(e.target.value);
                         followName(user, e.target.value);
                       }}
                       autoFocus
                     />
-                  </label>
-                  <label className="w-20">
-                    <span className="mb-0.5 block text-xs text-neutral-400">
-                      {t('dialogs.port')}
-                    </span>
+                  </Field>
+                  <Field
+                    label={t('dialogs.port')}
+                    required
+                    className="w-28"
+                    error={portOk ? undefined : t('dialogs.portInvalid')}
+                  >
                     <input
-                      className={input}
-                      type="number"
-                      value={port}
-                      onChange={(e) => setPort(Number(e.target.value) || 22)}
+                      className={`${inputCls} ${portOk ? '' : 'border-red-600'}`}
+                      inputMode="numeric"
+                      value={portText}
+                      onChange={(e) => setPortText(e.target.value.replace(/\D/g, '').slice(0, 5))}
                     />
-                  </label>
+                  </Field>
                 </div>
-                <label>
-                  <span className="mb-0.5 block text-xs text-neutral-400">
-                    {t('dialogs.username')}
-                  </span>
+                <Field label={t('dialogs.username')} required>
                   <input
-                    className={input}
+                    className={inputCls}
                     value={user}
                     autoComplete="username"
                     spellCheck={false}
@@ -506,28 +500,13 @@ function ConnectForm({
                       followName(e.target.value, host);
                     }}
                   />
-                </label>
-                <label className="mt-1 flex items-center gap-2 text-xs text-neutral-400">
-                  <input
-                    type="checkbox"
-                    checked={save}
-                    onChange={(e) => setSave(e.target.checked)}
-                    disabled={initial !== null}
-                  />
-                  {t('dialogs.saveSessionLabel')}
-                </label>
-              </>
-            )}
-            {/* 认证并入基本信息页签（仅 SSH）：顶部细分隔线分组 */}
-            {sessKind === 'ssh' && (
-              <>
-                <div className="mt-1 border-t border-neutral-800" />
-                <label>
-                  <span className="mb-0.5 block text-xs text-neutral-400">
-                    {t('dialogs.authMethod')}
-                  </span>
+                </Field>
+
+                <div className="border-t border-neutral-800" />
+
+                <Field label={t('dialogs.authMethod')}>
                   <select
-                    className={input}
+                    className={inputCls}
                     value={kind}
                     onChange={(e) => setKind(e.target.value as AuthKind)}
                   >
@@ -536,120 +515,225 @@ function ConnectForm({
                     <option value="keyboardInteractive">{t('dialogs.authKi')}</option>
                     <option value="agent">ssh-agent / Pageant</option>
                   </select>
-                </label>
+                </Field>
                 {kind === 'password' && (
-                  <label>
-                    <span className="mb-0.5 block text-xs text-neutral-400">
-                      {initial ? t('dialogs.passwordLabelEdit') : t('dialogs.password')}
-                    </span>
-                    <input
-                      className={input}
-                      type="password"
+                  <Field label={initial ? t('dialogs.passwordLabelEdit') : t('dialogs.password')}>
+                    <PasswordInput
                       value={password}
+                      onChange={setPassword}
                       autoComplete={initial ? 'current-password' : 'new-password'}
-                      spellCheck={false}
-                      onChange={(e) => setPassword(e.target.value)}
                     />
-                  </label>
+                  </Field>
                 )}
                 {kind === 'publicKey' && (
                   <>
-                    <label>
-                      <span className="mb-0.5 block text-xs text-neutral-400">
-                        {t('dialogs.keyPath')}
-                      </span>
-                      <input
-                        className={input}
-                        value={keyPath}
-                        autoComplete="off"
-                        spellCheck={false}
-                        onChange={(e) => setKeyPath(e.target.value)}
-                        placeholder={t('dialogs.keyPathPlaceholder')}
-                      />
-                    </label>
-                    <label>
-                      <span className="mb-0.5 block text-xs text-neutral-400">
-                        {t('dialogs.passphraseLabel')}
-                      </span>
-                      <input
-                        className={input}
-                        type="password"
-                        value={passphrase}
-                        spellCheck={false}
-                        onChange={(e) => setPassphrase(e.target.value)}
-                      />
-                    </label>
+                    <Field label={t('dialogs.keyPath')}>
+                      <div className="flex gap-2">
+                        <input
+                          className={inputCls}
+                          value={keyPath}
+                          autoComplete="off"
+                          spellCheck={false}
+                          onChange={(e) => setKeyPath(e.target.value)}
+                          placeholder={t('dialogs.keyPathPlaceholder')}
+                        />
+                        <button
+                          type="button"
+                          className={`${outlineBtn} shrink-0`}
+                          onClick={() => void pickKeyFile()}
+                        >
+                          {t('dialogs.browse')}
+                        </button>
+                      </div>
+                    </Field>
+                    <Field label={t('dialogs.passphraseLabel')}>
+                      <PasswordInput value={passphrase} onChange={setPassphrase} />
+                    </Field>
                   </>
                 )}
-                {/* su 二级登录（批次二十二）：用普通用户登入后自动 su 到目标用户（如 root）。
-                    密码仅存保险库；留空密码 = su 后手输 */}
-                <div className="mt-2 border-t border-neutral-800 pt-2">
-                  <span className="mb-1 block text-xs font-medium text-neutral-300">
-                    {t('dialogs.suSection')}
+              </>
+            )}
+
+            {sessKind === 'local' && (
+              <>
+                <Field label={t('dialogs.workdirLabel')}>
+                  <input
+                    className={inputCls}
+                    value={workdir}
+                    spellCheck={false}
+                    onChange={(e) => setWorkdir(e.target.value)}
+                    placeholder="D:\projects\my-app"
+                    autoFocus
+                  />
+                </Field>
+                <div className="flex gap-3">
+                  <Field label="Shell" className="w-56 shrink-0">
+                    <select
+                      className={inputCls}
+                      value={shell}
+                      onChange={(e) => setShell(e.target.value)}
+                    >
+                      <option value="">{t('dialogs.shellAuto')}</option>
+                      <option value="pwsh">{t('dialogs.shellPwsh')}</option>
+                      <option value="powershell">Windows PowerShell</option>
+                      <option value="cmd">{t('dialogs.shellCmd')}</option>
+                    </select>
+                  </Field>
+                  <Field label={t('dialogs.commandLabel')} className="flex-1">
+                    <input
+                      className={inputCls}
+                      value={command}
+                      spellCheck={false}
+                      onChange={(e) => setCommand(e.target.value)}
+                      placeholder={t('dialogs.commandPlaceholder')}
+                    />
+                  </Field>
+                </div>
+                <p className="text-xs text-neutral-400">{t('dialogs.localNote')}</p>
+              </>
+            )}
+
+            {(save || sessKind === 'local') && (
+              <>
+                <div className="border-t border-neutral-800" />
+                <Field label={t('dialogs.labelName')}>
+                  <input
+                    className={inputCls}
+                    value={name}
+                    onChange={(e) => {
+                      setNameTouched(true);
+                      setName(e.target.value);
+                    }}
+                    placeholder={t('dialogs.namePlaceholder')}
+                  />
+                </Field>
+                <div>
+                  <span className="mb-1.5 block text-xs font-medium text-neutral-400">
+                    {t('dialogs.labelColor')}
                   </span>
-                  <div className="flex gap-2">
-                    <label className="flex-1">
-                      <span className="mb-0.5 block text-xs text-neutral-400">
-                        {t('dialogs.suUser')}
-                      </span>
-                      <input
-                        className={input}
-                        value={suUser}
-                        autoComplete="off"
-                        spellCheck={false}
-                        placeholder={t('dialogs.suUserPlaceholder')}
-                        onChange={(e) => setSuUser(e.target.value)}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      title={t('dialogs.colorNone')}
+                      aria-label={t('dialogs.colorNoneAria')}
+                      className={`flex h-6 w-6 items-center justify-center rounded-full border border-neutral-600 text-xs leading-none text-neutral-400 ${
+                        color === null ? SWATCH_ACTIVE : ''
+                      }`}
+                      onClick={() => setColor(null)}
+                    >
+                      ∅
+                    </button>
+                    {PRESET_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        title={c}
+                        aria-label={t('dialogs.colorValueAria', { color: c })}
+                        style={{ backgroundColor: c }}
+                        className={`h-6 w-6 rounded-full ${color === c ? SWATCH_ACTIVE : ''}`}
+                        onClick={() => setColor(c)}
                       />
-                    </label>
-                    <label className="flex-1">
-                      <span className="mb-0.5 block text-xs text-neutral-400">
-                        {t('dialogs.suPassword')}
-                      </span>
-                      <input
-                        className={input}
-                        type="password"
-                        value={suPassword}
-                        autoComplete="new-password"
-                        spellCheck={false}
-                        placeholder={t('dialogs.suPasswordPlaceholder')}
-                        onChange={(e) => setSuPassword(e.target.value)}
-                      />
-                    </label>
+                    ))}
+                    {/* 调色板任意颜色 */}
+                    <input
+                      type="color"
+                      title={t('dialogs.customColor')}
+                      aria-label={t('dialogs.customColor')}
+                      value={color ?? '#3e63dd'}
+                      onChange={(e) => setColor(e.target.value)}
+                      className={`h-6 w-8 cursor-pointer rounded border border-neutral-600 bg-transparent p-0 ${
+                        color !== null && !PRESET_COLORS.includes(color) ? SWATCH_ACTIVE : ''
+                      }`}
+                    />
                   </div>
                 </div>
               </>
             )}
-            {/* 登录宏：进 shell 后逐行自动执行（SSH/本地通用；
-                su 手输密码时后端跳过并 toast 告知） */}
-            <label className="mt-2 block">
-              <span className="mb-0.5 block text-xs text-neutral-400">
-                {t('dialogs.loginMacro')}
-              </span>
-              <textarea
-                className={`${input} h-20 font-mono`}
-                value={loginMacro}
-                spellCheck={false}
-                placeholder={t('dialogs.loginMacroPlaceholder')}
-                onChange={(e) => setLoginMacro(e.target.value)}
-              />
-            </label>
-            {/* 终端编码：仅 SSH 会话可选；本地 ConPTY 协议面恒为 UTF-8，转码会出乱码 */}
+
+            {/* 高级选项折叠：su 二级登录 / 登录宏 / 终端编码；已配置过则默认展开 */}
+            <details
+              className="group rounded-lg border border-neutral-800"
+              open={initial !== null && advancedHasValue}
+            >
+              <summary className="flex h-10 cursor-pointer list-none items-center gap-2 px-3 text-neutral-300 select-none hover:text-neutral-100">
+                <Icon
+                  name="chevronRight"
+                  size={16}
+                  className="transition-transform group-open:rotate-90"
+                />
+                {t('dialogs.advancedOptions')}
+                {advancedHasValue && <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />}
+              </summary>
+              <div className="flex flex-col gap-4 border-t border-neutral-800 p-3">
+                {/* su 二级登录（批次二十二）：用普通用户登入后自动 su 到目标用户（如 root）。
+                    密码仅存保险库；留空密码 = su 后手输 */}
+                {sessKind === 'ssh' && (
+                  <div>
+                    <span className="mb-2 block font-medium text-neutral-300">
+                      {t('dialogs.suSection')}
+                    </span>
+                    <div className="flex gap-3">
+                      <Field label={t('dialogs.suUser')} className="flex-1">
+                        <input
+                          className={inputCls}
+                          value={suUser}
+                          autoComplete="off"
+                          spellCheck={false}
+                          placeholder={t('dialogs.suUserPlaceholder')}
+                          onChange={(e) => setSuUser(e.target.value)}
+                        />
+                      </Field>
+                      <Field label={t('dialogs.suPassword')} className="flex-1">
+                        <PasswordInput
+                          value={suPassword}
+                          onChange={setSuPassword}
+                          autoComplete="new-password"
+                          placeholder={t('dialogs.suPasswordPlaceholder')}
+                        />
+                      </Field>
+                    </div>
+                  </div>
+                )}
+                {/* 登录宏：进 shell 后逐行自动执行（SSH/本地通用；
+                    su 手输密码时后端跳过并 toast 告知） */}
+                <Field label={t('dialogs.loginMacro')}>
+                  <textarea
+                    className={`${inputCls} h-24 resize-y py-2 font-mono`}
+                    value={loginMacro}
+                    spellCheck={false}
+                    placeholder={t('dialogs.loginMacroPlaceholder')}
+                    onChange={(e) => setLoginMacro(e.target.value)}
+                  />
+                </Field>
+                {/* 终端编码：仅 SSH 会话可选；本地 ConPTY 协议面恒为 UTF-8，转码会出乱码 */}
+                {sessKind === 'ssh' && (
+                  <Field label={t('dialogs.encodingLabel')} className="w-56">
+                    <select
+                      className={inputCls}
+                      value={encoding}
+                      onChange={(e) => setEncoding(e.target.value)}
+                    >
+                      {ENCODING_OPTIONS.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {t(label)}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
+              </div>
+            </details>
+
             {sessKind === 'ssh' && (
-              <label>
-                <span className="mb-0.5 block text-xs text-neutral-400">
-                  {t('dialogs.encodingLabel')}
-                </span>
-                <select
-                  className={input}
-                  value={encoding}
-                  onChange={(e) => setEncoding(e.target.value)}
-                >
-                  {ENCODING_OPTIONS.map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {t(label)}
-                    </option>
-                  ))}
-                </select>
+              <label className="flex cursor-pointer items-center gap-2.5 text-neutral-300">
+                <input
+                  type="checkbox"
+                  className="size-4"
+                  checked={save}
+                  onChange={(e) => setSave(e.target.checked)}
+                  disabled={initial !== null}
+                />
+                {t('dialogs.saveSessionLabel')}
               </label>
             )}
           </>
@@ -659,19 +743,17 @@ function ConnectForm({
           (initial ? (
             <SessionTunnelsTab sessionId={initial.id} />
           ) : (
-            <p className="py-6 text-center text-xs text-neutral-500">
-              {t('dialogs.tunnelsNeedSave')}
-            </p>
+            <p className="py-8 text-center text-neutral-400">{t('dialogs.tunnelsNeedSave')}</p>
           ))}
 
         {tab === 'mcp' && (
-          <div className="text-xs">
-            <p className="mb-2 text-neutral-500">{t('dialogs.mcpPermHint')}</p>
-            <div className="space-y-2">
+          <div>
+            <p className="mb-3 text-neutral-400">{t('dialogs.mcpPermHint')}</p>
+            <div className="space-y-3">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-neutral-300">{t('dialogs.mcpLevel')}</span>
+                <span className="text-neutral-200">{t('dialogs.mcpLevel')}</span>
                 <select
-                  className="w-56 rounded border border-neutral-700 bg-neutral-800 px-2 py-1"
+                  className={`${inputCls} w-56`}
                   value={mcpLevel ?? 'inherit'}
                   onChange={(e) =>
                     setMcpLevel(e.target.value === 'inherit' ? null : e.target.value)
@@ -686,9 +768,9 @@ function ConnectForm({
                 </select>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span className="text-neutral-300">{t('dialogs.mcpProduction')}</span>
+                <span className="text-neutral-200">{t('dialogs.mcpProduction')}</span>
                 <select
-                  className="w-56 rounded border border-neutral-700 bg-neutral-800 px-2 py-1"
+                  className={`${inputCls} w-56`}
                   value={mcpProduction === null ? 'inherit' : mcpProduction ? 'yes' : 'no'}
                   onChange={(e) =>
                     setMcpProduction(e.target.value === 'inherit' ? null : e.target.value === 'yes')
@@ -703,9 +785,9 @@ function ConnectForm({
                 const v = mcpPerms[group];
                 return (
                   <div key={group} className="flex items-center justify-between gap-3">
-                    <span className="text-neutral-300">{t(labelKey)}</span>
+                    <span className="text-neutral-200">{t(labelKey)}</span>
                     <select
-                      className="w-32 rounded border border-neutral-700 bg-neutral-800 px-2 py-1"
+                      className={`${inputCls} w-40`}
                       value={v === undefined ? 'inherit' : v ? 'allow' : 'deny'}
                       onChange={(e) => {
                         const mode = e.target.value;
@@ -725,25 +807,27 @@ function ConnectForm({
         )}
 
         {error && (
-          <p aria-live="polite" className="text-xs text-red-400">
+          <p aria-live="polite" className="text-red-400">
             {error}
           </p>
         )}
       </div>
 
-      <div className="mt-2 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="flex items-center justify-between gap-3 border-t border-neutral-800 px-6 py-4">
+        <div className="flex min-w-0 items-center gap-3">
           {sessKind === 'ssh' && (
             <button
-              className="shrink-0 rounded border border-neutral-700 px-3 py-1 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+              className={`${outlineBtn} shrink-0`}
               onClick={() => void testConnect()}
-              disabled={busy || test.phase === 'testing' || !host.trim() || !user.trim()}
+              disabled={busy || test.phase === 'testing' || !sshReady}
+              title={notReadyHint}
             >
               {test.phase === 'testing' ? t('dialogs.testing') : t('dialogs.testConnect')}
             </button>
           )}
           {test.phase === 'ok' && (
-            <span aria-live="polite" className="truncate text-xs text-green-400">
+            <span aria-live="polite" className="flex items-center gap-1.5 truncate text-green-400">
+              <Icon name="checkCircle" size={16} />
               {test.latencyMs !== null
                 ? t('dialogs.testOkLatency', { ms: test.latencyMs })
                 : t('dialogs.testOk')}
@@ -752,33 +836,33 @@ function ConnectForm({
           {test.phase === 'err' && (
             <span
               aria-live="polite"
-              className="text-xs break-all text-red-400"
+              className="flex min-w-0 items-start gap-1.5 text-red-400"
               title={test.message}
             >
-              ✗ {test.message}
+              <Icon name="alert" size={16} className="mt-0.5 shrink-0" />
+              <span className="line-clamp-2 break-all">{test.message}</span>
             </span>
           )}
         </div>
         <div className="flex shrink-0 gap-2">
-          <button
-            className="rounded px-3 py-1 text-neutral-400 hover:bg-neutral-800"
-            onClick={close}
-          >
+          <button className={ghostBtn} onClick={close}>
             {t('dialogs.cancel')}
           </button>
           {sessKind === 'ssh' && save && (
             <button
-              className="rounded border border-neutral-700 px-3 py-1 text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+              className={outlineBtn}
               onClick={() => void submit(false)}
-              disabled={busy || !host.trim() || !user.trim()}
+              disabled={busy || !sshReady}
+              title={notReadyHint}
             >
               {t('dialogs.saveOnly')}
             </button>
           )}
           <button
-            className="rounded bg-blue-600 px-3 py-1 text-white hover:bg-blue-500 disabled:opacity-50"
+            className="h-9 rounded-md bg-blue-600 px-5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
             onClick={() => void submit(true)}
-            disabled={busy || (sessKind === 'ssh' && (!host.trim() || !user.trim()))}
+            disabled={busy || !canSubmit}
+            title={notReadyHint}
           >
             {sessKind === 'local'
               ? t('dialogs.saveAndOpen')
@@ -791,7 +875,6 @@ function ConnectForm({
     </Dialog>
   );
 }
-
 /** 隧道页（§9.1）：只列绑定当前服务器的规则；启动/停止/编辑/复制/删除 + 新建。 */
 function SessionTunnelsTab({ sessionId }: { sessionId: string }) {
   const tunnelDefs = useAppStore((s) => s.tunnelDefs);

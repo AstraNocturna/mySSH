@@ -12,7 +12,7 @@ import { initIdPrefix, isLocalTarget } from './state/app-store';
 import { invoke } from '@tauri-apps/api/core';
 import { Sidebar } from './components/Sidebar';
 import { TabBar } from './components/TabBar';
-import { AppToolbar } from './components/AppToolbar';
+import { ActivityRail } from './components/ActivityRail';
 import { CommandPalette } from './components/CommandPalette';
 import { SnippetsDialog } from './components/SnippetsDialog';
 import { RecordingsDialog } from './components/RecordingsDialog';
@@ -23,6 +23,8 @@ import { AiActivityPanel } from './components/AiActivityPanel';
 import { AiIdleDialog } from './components/AiIdleDialog';
 import { KiDialog } from './components/KiDialog';
 import { BottomDock } from './components/BottomDock';
+import { SideDock } from './components/SideDock';
+import { TunnelPopover } from './components/TunnelPopover';
 import { TransferIndicator } from './components/TransferIndicator';
 import { SettingsDialog } from './components/SettingsDialog';
 import { SplitTree } from './components/SplitTree';
@@ -231,48 +233,53 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-10 shrink-0 items-center justify-between border-b border-neutral-800 px-2 text-xs text-neutral-400">
+      <header className="myssh-tool flex h-11 shrink-0 items-center justify-between border-b border-neutral-800 px-2 text-sm text-neutral-400">
         <span className="flex items-center gap-2">
           <button
-            className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+            className="flex h-9 w-9 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
             onClick={toggleSidebar}
             aria-label={t('chrome.sidebarToggle')}
             title={t('chrome.sidebarToggle')}
           >
-            <Icon name="menu" />
+            <Icon name="menu" size={20} />
           </button>
           <span className="flex items-center gap-2">
-            <span className="myssh-logo flex h-5 w-5 items-center justify-center rounded-md text-white">
-              <Icon name="terminal" size={12} strokeWidth={2.5} />
+            <span className="myssh-logo flex h-6 w-6 items-center justify-center rounded-md text-white">
+              <Icon name="terminal" size={15} strokeWidth={2.5} />
             </span>
-            <span className="text-[13px] font-semibold tracking-tight text-neutral-100">mySSH</span>
+            <span className="text-base font-semibold tracking-tight text-neutral-100">mySSH</span>
           </span>
         </span>
-        <span className="flex items-center gap-2">
-          <AppToolbar />
-          <span className="tabular-nums text-[11px] text-neutral-500">v{version}</span>
-        </span>
+        <span className="tabular-nums text-xs text-neutral-500">v{version}</span>
       </header>
       <TabBar />
-      <main className="flex min-h-0 flex-1">
-        <Sidebar />
-        <div className="relative h-full min-w-0 flex-1">
-          {tabs.length === 0 ? (
-            <EmptyState />
-          ) : (
-            tabs.map((t) => (
-              <div
-                key={t.id}
-                className="h-full w-full"
-                style={{ display: t.id === activeId ? undefined : 'none' }}
-              >
-                <SplitTree tab={t} node={t.layout} visible={t.id === activeId} />
-              </div>
-            ))
-          )}
+      {/* 右缘图标栏全高；左侧列 = 主区（侧栏 + 终端 + 右侧监控面板）+ 底部 dock；隧道弹出面板浮在此行上 */}
+      <div className="relative flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <main className="flex min-h-0 flex-1">
+            <Sidebar />
+            <div className="relative h-full min-w-0 flex-1">
+              {tabs.length === 0 ? (
+                <EmptyState />
+              ) : (
+                tabs.map((t) => (
+                  <div
+                    key={t.id}
+                    className="h-full w-full"
+                    style={{ display: t.id === activeId ? undefined : 'none' }}
+                  >
+                    <SplitTree tab={t} node={t.layout} visible={t.id === activeId} />
+                  </div>
+                ))
+              )}
+            </div>
+            <SideDock />
+          </main>
+          {activeId && <BottomDock />}
         </div>
-      </main>
-      {activeId && <BottomDock />}
+        <ActivityRail />
+        <TunnelPopover />
+      </div>
       <TransferIndicator />
       <ConnectDialog />
       <QuickConnectDialog />

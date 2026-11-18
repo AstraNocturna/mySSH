@@ -114,7 +114,7 @@ export function TabBar() {
   };
 
   return (
-    <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800 bg-neutral-900 px-1.5">
+    <div className="myssh-tool flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800 bg-neutral-900 px-2">
       {tabs.map((t) => {
         const pane = primaryPane(t);
         const aiKind = Object.values(t.panes)
@@ -145,7 +145,7 @@ export function TabBar() {
                 ? { backgroundColor: `${sessionColor}${t.id === activeId ? '66' : '40'}` }
                 : undefined
             }
-            className={`group flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md pr-1 pl-2.5 text-xs ${
+            className={`group flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md pr-1.5 pl-3 text-sm ${
               t.id === activeId
                 ? `${sessionColor ? '' : 'bg-neutral-800 '}text-neutral-100 shadow-[inset_0_-2px_0_var(--myssh-chrome-accent)]`
                 : 'text-neutral-400 hover:bg-neutral-800/60 hover:text-neutral-200'
@@ -171,11 +171,11 @@ export function TabBar() {
               setMenu({ x: e.clientX, y: e.clientY, tab: t });
             }}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${STATE_DOT[pane?.state ?? ''] ?? ''}`} />
-            <span className="max-w-40 truncate">{t.title}</span>
+            <span className={`h-2 w-2 rounded-full ${STATE_DOT[pane?.state ?? ''] ?? ''}`} />
+            <span className="max-w-48 truncate">{t.title}</span>
             {aiKind && (
               <span
-                className="rounded bg-purple-600/70 px-1 text-[10px] leading-4 text-white"
+                className="rounded bg-purple-600/70 px-1.5 text-xs leading-5 text-white"
                 title={tr(aiKind === 'agent' ? 'chrome.aiAgentTitle' : 'chrome.aiSharedTitle')}
               >
                 AI
@@ -186,19 +186,16 @@ export function TabBar() {
             )}
             {recording && (
               <span
-                className="h-1.5 w-1.5 rounded-full bg-red-500"
+                className="h-2 w-2 rounded-full bg-red-500"
                 title={tr('chrome.recBadgeTitle')}
               />
             )}
             {/* 12.6：bell 待读标记（非活跃标签收到 BEL；激活即清，静态点无动画） */}
             {bellTabs.includes(t.id) && (
-              <span
-                className="h-1.5 w-1.5 rounded-full bg-blue-400"
-                title={tr('chrome.bellTitle')}
-              />
+              <span className="h-2 w-2 rounded-full bg-blue-400" title={tr('chrome.bellTitle')} />
             )}
             <button
-              className={`ml-0.5 flex h-5 w-5 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-100 group-hover:opacity-100 group-focus-within:opacity-100 ${
+              className={`ml-0.5 flex h-6 w-6 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-100 group-hover:opacity-100 group-focus-within:opacity-100 ${
                 t.id === activeId ? 'opacity-100' : 'opacity-0'
               }`}
               onClick={(e) => {
@@ -207,19 +204,19 @@ export function TabBar() {
               }}
               aria-label={tr('chrome.closeTabAria')}
             >
-              <Icon name="x" size={12} strokeWidth={2} />
+              <Icon name="x" size={14} strokeWidth={2} />
             </button>
           </div>
         );
       })}
       {/* 功能图标统一收进 AppToolbar（UX 批次 · 条目 8）；此处只保留标签与新建按钮 */}
       <button
-        className="flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+        className="flex h-9 shrink-0 items-center gap-1.5 rounded-md px-3 text-sm text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
         onClick={() => openConnect()}
         aria-label={tr('chrome.newConnection')}
         title={tr('chrome.newConnection')}
       >
-        <Icon name="plus" size={14} />
+        <Icon name="plus" size={16} />
         {tr('chrome.newConnection')}
       </button>
       {menu && (

@@ -21,8 +21,8 @@ import { useT } from '../i18n';
  * 运行态无 sessionId 字段的临时（非持久化）隧道无法归属，批次二十九起已无
  * 产生路径（一切隧道必经定义），旧 adhoc 区块随之移除。
  *
- * 展现形式：底部 dock 的「隧道」页签内容（原右上角弹层 TunnelPopover 已并入 dock），
- * 开关由 dock 托管（app-store dockTab）；编辑器/删除确认仍是 fixed 模态。
+ * 展现形式：TunnelPopover 弹出面板的内容（开关 app-store tunnelOpen）；
+ * 编辑器/删除确认仍是 fixed 模态。每条隧道一张卡片，窄宽度下也不需要横向滚动。
  */
 export function TunnelPanel() {
   const t = useT();
@@ -43,7 +43,7 @@ export function TunnelPanel() {
   );
   const [pendingDelete, setPendingDelete] = useState<TunnelDef | null>(null);
 
-  // 挂载（dock 切到隧道页签）即拉取定义；1Hz 运行态由 App 级 subscribeTunnels 提供
+  // 挂载（弹出面板打开）即拉取定义；1Hz 运行态由 App 级 subscribeTunnels 提供
   useEffect(() => {
     void loadTunnelDefs();
   }, [loadTunnelDefs]);
@@ -80,13 +80,14 @@ export function TunnelPanel() {
   };
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto px-4 py-3 text-xs text-neutral-200">
-      <div className="mb-2 flex items-center gap-3 border-b border-neutral-800 pb-2 text-neutral-400">
-        <span className="truncate">{t('panels.tunnelHeaderNote')}</span>
-        <span className="flex-1" />
+    <div className="min-h-0 px-3 py-2 text-xs text-neutral-200">
+      <div className="mb-2 flex items-center gap-3 text-neutral-500">
+        <span className="min-w-0 flex-1 truncate" title={t('panels.tunnelHeaderNote')}>
+          {t('panels.tunnelHeaderNote')}
+        </span>
         {sessionId && (
           <button
-            className="shrink-0 rounded border border-neutral-700 px-2 py-0.5 text-neutral-300 hover:bg-neutral-800"
+            className="shrink-0 rounded-md bg-blue-600 px-2.5 py-1 text-white hover:bg-blue-500"
             onClick={() => setEditor({ sessionId, def: null })}
           >
             {t('panels.newTunnel')}
@@ -99,112 +100,99 @@ export function TunnelPanel() {
       ) : defs.length === 0 ? (
         <p className="py-2 text-neutral-400">{t('panels.noTunnels')}</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse whitespace-nowrap">
-            <thead className="border-b border-neutral-800 text-neutral-500">
-              <tr>
-                <th className="py-0.5 pr-3 text-left font-normal">{t('panels.colName')}</th>
-                <th className="pr-3 text-left font-normal">{t('panels.colType')}</th>
-                <th className="pr-3 text-left font-normal">{t('panels.colAddress')}</th>
-                <th className="pr-3 text-left font-normal">{t('panels.colStatus')}</th>
-                <th className="pr-3 text-left font-normal">{t('panels.colStartMode')}</th>
-                <th className="pr-3 text-left font-normal">{t('panels.colRate')}</th>
-                <th className="pr-3 text-left font-normal" title={t('panels.colConnsHint')}>
-                  {t('panels.colConns')}
-                </th>
-                <th className="pr-3 text-left font-normal">{t('panels.colError')}</th>
-                <th className="text-left font-normal">{t('panels.colActions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {defs.map((d) => {
-                const rt = runtimeById.get(d.id);
-                return (
-                  <tr key={d.id} className="border-t border-neutral-800/60">
-                    <td className="py-1 pr-3 text-neutral-200" title={tunnelDisplayName(d)}>
-                      {tunnelDisplayName(d)}
-                    </td>
-                    <td className="pr-3 text-neutral-400">{kindLabel(d.kind)}</td>
-                    <td
-                      className="pr-3 font-mono text-neutral-300"
-                      title={`${d.bindHost}:${d.bindPort}${d.targetHost ? ` → ${d.targetHost}:${d.targetPort}` : ''}`}
+        <ul className="flex flex-col gap-2">
+          {defs.map((d) => {
+            const rt = runtimeById.get(d.id);
+            const addr = `${d.bindHost}:${d.bindPort}${d.targetHost ? ` → ${d.targetHost}:${d.targetPort}` : ''}`;
+            const dot = !rt
+              ? 'bg-neutral-600'
+              : rt.status === 'listening'
+                ? 'bg-green-500'
+                : rt.status === 'failed'
+                  ? 'bg-red-500'
+                  : 'bg-yellow-500';
+            return (
+              <li
+                key={d.id}
+                className="rounded-md border border-neutral-800 bg-neutral-950/40 px-3 py-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} />
+                  <span
+                    className="min-w-0 flex-1 truncate font-medium text-neutral-100"
+                    title={tunnelDisplayName(d)}
+                  >
+                    {tunnelDisplayName(d)}
+                  </span>
+                  <span className="shrink-0 rounded bg-neutral-800 px-1.5 py-0.5 text-xs text-neutral-400">
+                    {kindLabel(d.kind)}
+                  </span>
+                </div>
+                <div className="mt-1 truncate font-mono text-xs text-neutral-400" title={addr}>
+                  {addr}
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 text-xs text-neutral-500 tabular-nums">
+                  <span className={rt?.status === 'failed' ? 'text-red-400' : undefined}>
+                    {rt ? statusLabel(rt.status) : t('panels.tunnelNotRunning')}
+                  </span>
+                  <span>{START_MODE_LABEL[startModeOf(d)]}</span>
+                  {rt && (
+                    <>
+                      <span>
+                        ↑{fmtRate(rt.rateUp)} ↓{fmtRate(rt.rateDown)}
+                      </span>
+                      <span title={t('panels.colConnsHint')}>
+                        {t('panels.connCount', { count: rt.activeConns })}
+                      </span>
+                    </>
+                  )}
+                </div>
+                {rt?.lastError && (
+                  <div className="mt-1 truncate text-xs text-red-400" title={rt.lastError}>
+                    {rt.lastError}
+                  </div>
+                )}
+                <div className="mt-2 flex items-center gap-1">
+                  {rt ? (
+                    <button
+                      className="rounded-md border border-neutral-700 px-2 py-0.5 text-neutral-200 hover:border-red-700 hover:text-red-400"
+                      onClick={() => void stopTunnel(d.id)}
                     >
-                      {d.bindHost}:{d.bindPort}
-                      {d.targetHost ? ` → ${d.targetHost}:${d.targetPort}` : ''}
-                    </td>
-                    <td className="pr-3">
-                      {rt ? (
-                        <span
-                          className={
-                            rt.status === 'listening'
-                              ? 'text-green-400'
-                              : rt.status === 'failed'
-                                ? 'text-red-400'
-                                : 'text-yellow-400'
-                          }
-                        >
-                          {statusLabel(rt.status)}
-                        </span>
-                      ) : (
-                        <span className="text-neutral-400">{t('panels.tunnelNotRunning')}</span>
-                      )}
-                    </td>
-                    <td className="pr-3 text-neutral-400">{START_MODE_LABEL[startModeOf(d)]}</td>
-                    <td className="pr-3 tabular-nums">
-                      {rt ? `↑${fmtRate(rt.rateUp)} ↓${fmtRate(rt.rateDown)}` : '—'}
-                    </td>
-                    <td className="pr-3 tabular-nums">
-                      {rt ? t('panels.connCount', { count: rt.activeConns }) : '—'}
-                    </td>
-                    <td
-                      className="max-w-48 truncate pr-3 text-red-400"
-                      title={rt?.lastError ?? undefined}
+                      {t('panels.stop')}
+                    </button>
+                  ) : (
+                    <button
+                      className="rounded-md border border-neutral-700 px-2 py-0.5 text-neutral-200 hover:border-green-700 hover:text-green-400"
+                      onClick={() => void startDef(d)}
                     >
-                      {rt?.lastError ?? ''}
-                    </td>
-                    <td className="whitespace-nowrap">
-                      {rt ? (
-                        <button
-                          className="rounded px-1.5 text-neutral-400 hover:text-red-400"
-                          onClick={() => void stopTunnel(d.id)}
-                        >
-                          {t('panels.stop')}
-                        </button>
-                      ) : (
-                        <button
-                          className="rounded px-1.5 text-neutral-400 hover:text-green-400"
-                          onClick={() => void startDef(d)}
-                        >
-                          {t('panels.start')}
-                        </button>
-                      )}
-                      <button
-                        className="rounded px-1.5 text-neutral-400 hover:text-neutral-200"
-                        onClick={() => setEditor({ sessionId: d.sessionId, def: d })}
-                      >
-                        {t('panels.edit')}
-                      </button>
-                      <button
-                        className="rounded px-1.5 text-neutral-400 hover:text-neutral-200"
-                        onClick={() => void duplicate(d)}
-                      >
-                        {t('panels.duplicate')}
-                      </button>
-                      <button
-                        className="rounded px-1.5 text-neutral-400 hover:text-red-400"
-                        onClick={() => setPendingDelete(d)}
-                      >
-                        {t('panels.delete')}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                      {t('panels.start')}
+                    </button>
+                  )}
+                  <span className="flex-1" />
+                  <button
+                    className="rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+                    onClick={() => setEditor({ sessionId: d.sessionId, def: d })}
+                  >
+                    {t('panels.edit')}
+                  </button>
+                  <button
+                    className="rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+                    onClick={() => void duplicate(d)}
+                  >
+                    {t('panels.duplicate')}
+                  </button>
+                  <button
+                    className="rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-red-400"
+                    onClick={() => setPendingDelete(d)}
+                  >
+                    {t('panels.delete')}
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       )}
-
       {editor && (
         <TunnelEditor
           sessionId={editor.sessionId}

@@ -69,7 +69,7 @@ export function TransferIndicator() {
     return (
       <button
         role="status"
-        className={`myssh-row-in fixed right-4 bottom-12 z-40 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs shadow-xl ${
+        className={`myssh-tool myssh-row-in fixed right-14 bottom-12 z-40 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs shadow-xl ${
           failed
             ? 'border-red-700 bg-red-950 text-red-200'
             : 'border-green-700 bg-green-950 text-green-200'
@@ -86,7 +86,7 @@ export function TransferIndicator() {
       role="status"
       aria-live="polite"
       title={t('panels.clickTransferManager')}
-      className="myssh-row-in fixed right-4 bottom-12 z-40 flex w-64 flex-col gap-1.5 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-left text-xs text-neutral-200 shadow-xl"
+      className="myssh-tool myssh-row-in fixed right-14 bottom-12 z-40 flex w-64 flex-col gap-1.5 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-2 text-left text-xs text-neutral-200 shadow-xl"
       onClick={() => useAppStore.getState().openDock('transfer')}
     >
       <div className="flex items-center gap-2">

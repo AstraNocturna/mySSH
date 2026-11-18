@@ -3,6 +3,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { isLocalTarget, useAppStore } from '../state/app-store';
 import type { MetricsEvent, MetricsSnapshot } from '../term/types';
 import { useT, type MsgKey } from '../i18n';
+import { Icon } from './Icon';
 
 /** 环形缓冲长度（2s 间隔 ≈ 4 分钟窗口） */
 const CAP = 120;
@@ -125,13 +126,13 @@ function Chart({
       })
       .join('  ');
     g.fillStyle = '#a3a3a3';
-    g.font = '10px sans-serif';
+    g.font = '12px sans-serif';
     g.fillText(
       `${title}   ${label}   ${t('panels.chartPeak', { peak: series[0]?.fmt(peak) ?? '' })}`,
       6,
-      11,
+      13,
     );
-    const top = 14;
+    const top = 20;
     const plotH = h - top - 2;
     for (const sr of series) {
       g.strokeStyle = sr.color;
@@ -153,7 +154,7 @@ function Chart({
       g.stroke();
     }
   });
-  return <canvas ref={ref} className="h-16 w-full" />;
+  return <canvas ref={ref} className="h-24 w-full shrink-0" />;
 }
 
 export function MetricsPanel({ tabId }: { tabId: string }) {
@@ -202,22 +203,11 @@ export function MetricsPanel({ tabId }: { tabId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-neutral-900 text-xs text-neutral-300">
-      <div className="flex items-center gap-3 border-b border-neutral-800 px-2 py-1">
-        <span className="font-semibold text-neutral-200">{t('panels.metricsTitle')}</span>
-        {latest && (
-          <span className="text-neutral-400">
-            load {latest.load.map((v) => v.toFixed(2)).join(' / ')} · {t('panels.mem')}{' '}
-            {memUsedGb.toFixed(1)}/{memTotalGb.toFixed(1)}G
-            {latest.swapTotalKb > 0 && ` · swap ${swapUsedGb.toFixed(1)}G`} · {t('panels.procs')}{' '}
-            {latest.procsRunning}/{latest.procsTotal}
+      <div className="flex shrink-0 flex-col gap-1 border-b border-neutral-800 px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span className="flex-1 text-sm font-semibold text-neutral-200">
+            {t('panels.metricsTitle')}
           </span>
-        )}
-        {error && (
-          <span className={fatal ? 'text-red-400' : 'text-amber-400'}>
-            {fatal ? t('panels.metricsFatal') : t('panels.metricsError')}: {error}
-          </span>
-        )}
-        <span className="ml-auto flex items-center gap-2">
           <select
             className="rounded bg-neutral-800 px-1 py-0.5"
             value={intervalMs}
@@ -230,44 +220,64 @@ export function MetricsPanel({ tabId }: { tabId: string }) {
             <option value={10000}>10s</option>
           </select>
           <button
-            className="rounded px-1 text-neutral-500 hover:text-neutral-200"
-            onClick={closeDock}
+            className="flex h-6 w-6 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+            onClick={() => closeDock('metrics')}
             aria-label={t('panels.closeMetrics')}
+            title={t('panels.closeMetrics')}
           >
-            ✕
+            <Icon name="x" size={14} />
           </button>
-        </span>
+        </div>
+        {latest && (
+          <div className="flex flex-wrap gap-x-3 text-xs text-neutral-400 tabular-nums">
+            <span>load {latest.load.map((v) => v.toFixed(2)).join(' / ')}</span>
+            <span>
+              {t('panels.mem')} {memUsedGb.toFixed(1)}/{memTotalGb.toFixed(1)}G
+            </span>
+            {latest.swapTotalKb > 0 && <span>swap {swapUsedGb.toFixed(1)}G</span>}
+            <span>
+              {t('panels.procs')} {latest.procsRunning}/{latest.procsTotal}
+            </span>
+          </div>
+        )}
+        {error && (
+          <div className={`text-xs ${fatal ? 'text-red-400' : 'text-amber-400'}`}>
+            {fatal ? t('panels.metricsFatal') : t('panels.metricsError')}: {error}
+          </div>
+        )}
       </div>
-      <div className="grid flex-1 grid-cols-3 gap-1 overflow-hidden px-1">
-        {CHARTS.map((c) => (
-          <Chart key={c.title} title={t(c.title)} series={c.series} buf={buf} />
-        ))}
-      </div>
-      <div className="h-24 overflow-y-auto border-t border-neutral-800">
-        <table className="w-full text-left">
-          <thead className="sticky top-0 bg-neutral-900 text-neutral-500">
-            <tr>
-              <th className="px-2 font-normal">PID</th>
-              <th className="px-2 font-normal">RSS</th>
-              <th className="px-2 font-normal">CPU%</th>
-              <th className="px-2 font-normal">MEM%</th>
-              <th className="px-2 font-normal">{t('panels.processColumn')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(latest?.procs ?? []).slice(0, 15).map((p) => (
-              <tr key={p.pid} className="border-t border-neutral-800/50">
-                <td className="px-2 tabular-nums">{p.pid}</td>
-                <td className="px-2 tabular-nums">{fmtBps(p.rssKb * 1024)}</td>
-                <td className="px-2 tabular-nums">{p.cpuPct.toFixed(1)}</td>
-                <td className="px-2 tabular-nums">{p.memPct.toFixed(1)}</td>
-                <td className="truncate px-2" title={p.comm}>
-                  {p.comm}
-                </td>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="flex flex-col gap-1 px-2 py-1">
+          {CHARTS.map((c) => (
+            <Chart key={c.title} title={t(c.title)} series={c.series} buf={buf} />
+          ))}
+        </div>
+        <div className="min-h-32 border-t border-neutral-800">
+          <table className="w-full text-left">
+            <thead className="sticky top-0 bg-neutral-900 text-neutral-500">
+              <tr>
+                <th className="px-2 font-normal">PID</th>
+                <th className="px-2 font-normal">RSS</th>
+                <th className="px-2 font-normal">CPU%</th>
+                <th className="px-2 font-normal">MEM%</th>
+                <th className="px-2 font-normal">{t('panels.processColumn')}</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {(latest?.procs ?? []).slice(0, 15).map((p) => (
+                <tr key={p.pid} className="border-t border-neutral-800/50">
+                  <td className="px-2 tabular-nums">{p.pid}</td>
+                  <td className="px-2 tabular-nums">{fmtBps(p.rssKb * 1024)}</td>
+                  <td className="px-2 tabular-nums">{p.cpuPct.toFixed(1)}</td>
+                  <td className="px-2 tabular-nums">{p.memPct.toFixed(1)}</td>
+                  <td className="truncate px-2" title={p.comm}>
+                    {p.comm}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore } from '../state/app-store';
 import { useT } from '../i18n';
+import { Icon } from './Icon';
 
 /** 可编辑路径栏（批次五 11.1）：后退/前进/上一级/刷新 + 点击编辑。
  *  批次六：复制当前路径按钮；输入时基于父目录列表的模糊建议
@@ -127,9 +128,10 @@ export function PathBar(p: Props) {
     })();
   };
 
-  const btn = 'rounded px-1 text-neutral-400 hover:bg-neutral-800 disabled:opacity-30';
+  const btn =
+    'flex h-7 w-7 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-30 disabled:hover:bg-transparent';
   return (
-    <div className="flex items-center gap-1 border-b border-neutral-800 px-2 py-1 text-xs text-neutral-500">
+    <div className="flex items-center gap-0.5 border-b border-neutral-800 px-2 py-1 text-[13px] text-neutral-500">
       <button
         className={btn}
         onClick={p.onBack}
@@ -137,7 +139,7 @@ export function PathBar(p: Props) {
         title={t('panels.back')}
         aria-label={t('panels.back')}
       >
-        ←
+        <Icon name="arrowLeft" size={16} />
       </button>
       <button
         className={btn}
@@ -146,10 +148,10 @@ export function PathBar(p: Props) {
         title={t('panels.forward')}
         aria-label={t('panels.forward')}
       >
-        →
+        <Icon name="arrowRight" size={16} />
       </button>
       <button className={btn} onClick={p.onUp} title={t('panels.up')} aria-label={t('panels.up')}>
-        ↑
+        <Icon name="arrowUp" size={16} />
       </button>
       <button
         className={btn}
@@ -157,13 +159,13 @@ export function PathBar(p: Props) {
         title={t('panels.refresh')}
         aria-label={t('panels.refresh')}
       >
-        ⟳
+        <Icon name="refresh" size={15} className={p.loading ? 'animate-spin' : ''} />
       </button>
       {editing ? (
         <span className="relative flex min-w-0 flex-1 flex-col">
           <input
             ref={inputRef}
-            className={`w-full rounded border bg-neutral-800 px-1.5 py-0.5 font-mono text-neutral-200 outline-none ${
+            className={`h-7 w-full rounded border bg-neutral-800 px-2 font-mono text-neutral-200 outline-none ${
               error ? 'border-red-600' : 'border-blue-600'
             }`}
             value={draft}
@@ -210,7 +212,7 @@ export function PathBar(p: Props) {
                   key={s}
                   role="option"
                   aria-selected={i === activeSug}
-                  className={`cursor-pointer truncate px-2 py-0.5 font-mono ${
+                  className={`cursor-pointer truncate px-2 py-1 font-mono ${
                     i === activeSug
                       ? 'bg-neutral-700 text-neutral-100'
                       : 'text-neutral-300 hover:bg-neutral-800'
@@ -233,7 +235,7 @@ export function PathBar(p: Props) {
       ) : (
         <button
           type="button"
-          className="min-w-0 flex-1 cursor-text truncate rounded px-1 py-0.5 text-left font-mono text-neutral-400 hover:bg-neutral-800"
+          className="mx-1 h-7 min-w-0 flex-1 cursor-text truncate rounded px-2 text-left font-mono text-neutral-300 hover:bg-neutral-800"
           title={t('panels.clickToEdit', { path: p.path || p.placeholder })}
           onClick={() => setDraft(p.path)}
         >
@@ -247,9 +249,12 @@ export function PathBar(p: Props) {
         title={copied ? t('panels.copied') : t('panels.copyPath')}
         aria-label={copied ? t('panels.copied') : t('panels.copyPath')}
       >
-        {copied ? '✓' : '⧉'}
+        <Icon
+          name={copied ? 'check' : 'copy'}
+          size={15}
+          className={copied ? 'text-green-400' : ''}
+        />
       </button>
-      {p.loading && <span className="animate-pulse">…</span>}
     </div>
   );
 }

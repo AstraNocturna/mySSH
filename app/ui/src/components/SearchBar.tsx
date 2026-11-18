@@ -35,15 +35,15 @@ export function SearchBar({
     onFind(inputRef.current?.value ?? '', dir, o);
 
   const toggleBtn = (on: boolean) =>
-    `rounded px-1 text-xs ${on ? 'bg-blue-700 text-white' : 'text-neutral-400 hover:text-neutral-100'}`;
+    `rounded px-1.5 py-0.5 text-sm ${on ? 'bg-blue-700 text-white' : 'text-neutral-400 hover:text-neutral-100'}`;
 
   return (
     // right-10：避开 PaneFrame 右上角悬浮的 pane 关闭 ×（right-1 top-1，宽约 26px），
     // 否则搜索条自身的关闭钮与之几乎重合
-    <div className="absolute top-1 right-10 z-10 flex items-center gap-1 rounded border border-neutral-700 bg-neutral-900/95 px-2 py-1 shadow-lg">
+    <div className="myssh-tool absolute top-1 right-10 z-10 flex items-center gap-1.5 rounded border border-neutral-700 bg-neutral-900/95 px-2 py-1.5 shadow-lg">
       <input
         ref={inputRef}
-        className="w-48 rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-200 outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+        className="w-56 rounded bg-neutral-800 px-2 py-1 text-sm text-neutral-200 outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
         placeholder={t('panels.searchScrollback')}
         aria-label={t('panels.searchTerminalOutput')}
         onChange={() => find('next')}
@@ -82,7 +82,7 @@ export function SearchBar({
         ⌗{t('panels.wholeWordLabel')}
       </button>
       <span
-        className="min-w-10 text-center text-xs tabular-nums text-neutral-500"
+        className="min-w-12 text-center text-sm tabular-nums text-neutral-500"
         aria-live="polite"
         data-testid="search-count"
       >
@@ -93,7 +93,7 @@ export function SearchBar({
           : ''}
       </span>
       <button
-        className="px-1 text-xs text-neutral-400 hover:text-neutral-100"
+        className="rounded px-1.5 py-0.5 text-base leading-none text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
         onClick={() => find('prev')}
         title={t('panels.previousMatch')}
         aria-label={t('panels.previous')}
@@ -101,7 +101,7 @@ export function SearchBar({
         ↑
       </button>
       <button
-        className="px-1 text-xs text-neutral-400 hover:text-neutral-100"
+        className="rounded px-1.5 py-0.5 text-base leading-none text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
         onClick={() => find('next')}
         title={t('panels.nextMatch')}
         aria-label={t('panels.next')}
@@ -109,7 +109,7 @@ export function SearchBar({
         ↓
       </button>
       <button
-        className="px-1 text-xs text-neutral-400 hover:text-neutral-100"
+        className="rounded px-1.5 py-0.5 text-base leading-none text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
         onClick={onClose}
         title={t('panels.closeSearchEsc')}
         aria-label={t('panels.closeSearch')}

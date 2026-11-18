@@ -277,6 +277,11 @@ export const enDialogs: Record<keyof typeof zhDialogs, string> = {
   'dialogs.downloadDirHint':
     'When set, SFTP download actions always target this folder; leave empty to follow the local pane.',
   'dialogs.browse': 'Browse…',
+  'dialogs.portInvalid': 'Port must be 1–65535',
+  'dialogs.fillRequired': 'Fill in host, port and username first',
+  'dialogs.advancedOptions': 'Advanced options',
+  'dialogs.showPassword': 'Show password',
+  'dialogs.hidePassword': 'Hide password',
   'dialogs.clearDownloadDir': 'Clear',
   'dialogs.browseFailed': 'Failed to open folder picker: {error}',
   'dialogs.retentionSection': 'History Retention',

@@ -15,7 +15,7 @@ import { Icon, type IconName } from './Icon';
 import { PolicySettings } from './PolicySettings';
 
 const inputCls =
-  'h-7 rounded-md border border-neutral-700 bg-neutral-800 px-2 text-xs text-neutral-200 outline-none';
+  'h-9 rounded-md border border-neutral-700 bg-neutral-800 px-2.5 text-sm text-neutral-200 outline-none';
 
 /** 终端字体候选（等宽）；document.fonts.check 探测系统已装，探测失败则全量列出 */
 const FONT_CANDIDATES = [
@@ -156,7 +156,7 @@ function ThemeCard({
       <div className="flex items-center justify-between px-0.5">
         <span className="truncate text-neutral-200">{label}</span>
         {ui && (
-          <span className="rounded bg-neutral-800 px-1 text-[10px] text-neutral-400">
+          <span className="rounded bg-neutral-800 px-1.5 text-xs text-neutral-400">
             {ui === 'dark' ? t('dialogs.themeDarkBadge') : t('dialogs.themeLightBadge')}
           </span>
         )}
@@ -245,26 +245,26 @@ export function SettingsDialog() {
     <Dialog
       title={t('dialogs.settingsTitle')}
       onClose={toggleSettings}
-      panelClass="flex h-[640px] max-h-[85vh] w-[820px] max-w-[94vw] flex-col overscroll-contain overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 text-xs text-neutral-300 shadow-xl"
+      panelClass="myssh-tool flex h-[720px] max-h-[88vh] w-[980px] max-w-[94vw] flex-col overscroll-contain overflow-hidden rounded-xl border border-neutral-700 bg-neutral-900 text-sm text-neutral-300 shadow-xl"
     >
-      <div className="flex items-center justify-between border-b border-neutral-800 py-3 pr-3 pl-5">
-        <h2 className="text-sm font-semibold text-neutral-100">{t('dialogs.settingsTitle')}</h2>
+      <div className="flex items-center justify-between border-b border-neutral-800 py-3.5 pr-3 pl-6">
+        <h2 className="text-lg font-semibold text-neutral-100">{t('dialogs.settingsTitle')}</h2>
         <button
-          className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+          className="flex h-9 w-9 items-center justify-center rounded-md text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
           onClick={toggleSettings}
           aria-label={t('dialogs.closeSettings')}
         >
-          <Icon name="x" size={15} />
+          <Icon name="x" size={18} />
         </button>
       </div>
 
       <div className="flex min-h-0 flex-1">
         {/* 左导航 */}
-        <nav className="flex w-44 shrink-0 flex-col gap-0.5 border-r border-neutral-800 bg-neutral-950/40 p-2">
+        <nav className="flex w-56 shrink-0 flex-col gap-1 border-r border-neutral-800 bg-neutral-950/40 p-3">
           {NAV_TABS.map(([id, labelKey, icon]) => (
             <button
               key={id}
-              className={`flex h-8 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] ${
+              className={`flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm ${
                 tab === id
                   ? 'bg-blue-600/15 text-blue-300'
                   : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
@@ -272,18 +272,18 @@ export function SettingsDialog() {
               aria-current={tab === id ? 'page' : undefined}
               onClick={() => setTab(id)}
             >
-              <Icon name={icon} size={15} />
+              <Icon name={icon} size={18} />
               {t(labelKey)}
             </button>
           ))}
         </nav>
 
         {/* 右内容区 */}
-        <div className="flex min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-5 [&>section]:mb-0">
+        <div className="flex min-w-0 flex-1 flex-col gap-7 overflow-y-auto p-6 [&>section]:mb-0 [&_input[type=checkbox]]:size-4 [&_input[type=radio]]:size-4">
           {tab === 'general' && (
             <>
               <section className="mb-4">
-                <h3 className="mb-1.5 font-semibold text-neutral-200">语言 / Language</h3>
+                <h3 className="mb-2.5 text-base font-semibold text-neutral-100">语言 / Language</h3>
                 <select
                   className={inputCls}
                   aria-label={t('dialogs.languageAria')}
@@ -296,7 +296,9 @@ export function SettingsDialog() {
               </section>
 
               <section className="mb-4">
-                <h3 className="mb-1.5 font-semibold text-neutral-200">{t('dialogs.uiSection')}</h3>
+                <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
+                  {t('dialogs.uiSection')}
+                </h3>
                 <label className="flex items-center gap-2" htmlFor="set-statusbar">
                   <input
                     id="set-statusbar"
@@ -309,7 +311,7 @@ export function SettingsDialog() {
               </section>
 
               <section>
-                <h3 className="mb-1.5 font-semibold text-neutral-200">
+                <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
                   {t('dialogs.sidebarSection')}
                 </h3>
                 <label className="flex items-center gap-2" htmlFor="set-click-connect">
@@ -324,12 +326,12 @@ export function SettingsDialog() {
               </section>
 
               <section>
-                <h3 className="mb-1.5 font-semibold text-neutral-200">
+                <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
                   {t('dialogs.downloadDirSection')}
                 </h3>
                 <div className="flex items-center gap-2">
                   <span
-                    className="min-w-0 flex-1 truncate rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-xs text-neutral-300"
+                    className="min-w-0 flex-1 truncate rounded-md border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-sm text-neutral-300"
                     title={
                       typeof settings['sftp.downloadDir'] === 'string'
                         ? settings['sftp.downloadDir']
@@ -342,7 +344,7 @@ export function SettingsDialog() {
                       : '—'}
                   </span>
                   <button
-                    className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+                    className="rounded-md bg-neutral-800 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-700"
                     onClick={() => {
                       void (async () => {
                         try {
@@ -359,7 +361,7 @@ export function SettingsDialog() {
                   {typeof settings['sftp.downloadDir'] === 'string' &&
                     !!settings['sftp.downloadDir'] && (
                       <button
-                        className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+                        className="rounded-md bg-neutral-800 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-700"
                         onClick={() => setSetting('sftp.downloadDir', '')}
                       >
                         {t('dialogs.clearDownloadDir')}
@@ -370,7 +372,7 @@ export function SettingsDialog() {
               </section>
 
               <section>
-                <h3 className="mb-1.5 font-semibold text-neutral-200">
+                <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
                   {t('dialogs.retentionSection')}
                 </h3>
                 <div className="grid grid-cols-[auto_auto_1fr] items-center gap-x-2 gap-y-1.5">
@@ -399,7 +401,7 @@ export function SettingsDialog() {
 
               {/* 轴一 1.2：一键导出诊断包（日志可能含主机地址/用户名，文案提示用户自审） */}
               <section>
-                <h3 className="mb-1.5 font-semibold text-neutral-200">
+                <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
                   {t('dialogs.diagSection')}
                 </h3>
                 <div className="flex items-center gap-2">
@@ -408,7 +410,7 @@ export function SettingsDialog() {
                   </label>
                   <select
                     id="set-diag-range"
-                    className="rounded border border-neutral-700 bg-neutral-800 px-1.5 py-1 text-xs text-neutral-300"
+                    className="rounded-md border border-neutral-700 bg-neutral-800 px-2 py-1.5 text-sm text-neutral-300"
                     value={diagRange}
                     onChange={(e) => setDiagRange(e.target.value)}
                   >
@@ -418,7 +420,7 @@ export function SettingsDialog() {
                     <option value="all">{t('dialogs.diagRangeAll')}</option>
                   </select>
                   <button
-                    className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+                    className="rounded-md bg-neutral-800 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-700"
                     onClick={() => {
                       void (async () => {
                         const path = await save({
@@ -448,8 +450,10 @@ export function SettingsDialog() {
 
           {tab === 'terminal' && (
             <section>
-              <h3 className="mb-1.5 font-semibold text-neutral-200">{t('dialogs.terminal')}</h3>
-              <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2">
+              <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
+                {t('dialogs.terminal')}
+              </h3>
+              <div className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-3.5">
                 <label htmlFor="set-font">{t('dialogs.font')}</label>
                 <select
                   id="set-font"
@@ -540,7 +544,9 @@ export function SettingsDialog() {
           {tab === 'appearance' && (
             <>
               <section className="mb-4">
-                <h3 className="mb-1.5 font-semibold text-neutral-200">{t('dialogs.theme')}</h3>
+                <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
+                  {t('dialogs.theme')}
+                </h3>
                 <div className="grid grid-cols-4 gap-2">
                   <ThemeCard
                     id="system"
@@ -593,7 +599,7 @@ export function SettingsDialog() {
               <section>
                 <div className="flex items-center gap-2">
                   <span className="text-neutral-500">{t('dialogs.backgroundImage')}</span>
-                  <label className="cursor-pointer rounded bg-neutral-800 px-2 py-0.5 text-neutral-300 hover:bg-neutral-700">
+                  <label className="cursor-pointer rounded-md bg-neutral-800 px-3 py-1.5 text-neutral-200 hover:bg-neutral-700">
                     {t('dialogs.backgroundImageChoose')}
                     <input
                       type="file"
@@ -617,7 +623,7 @@ export function SettingsDialog() {
                   </label>
                   {bgImage && (
                     <button
-                      className="rounded px-2 py-0.5 text-neutral-400 hover:bg-neutral-800"
+                      className="rounded-md px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
                       onClick={() => setSetting('terminal.backgroundImage', '')}
                     >
                       {t('dialogs.backgroundImageClear')}
@@ -652,8 +658,8 @@ export function SettingsDialog() {
 
           {tab === 'mcp' && (
             <section>
-              <h3 className="mb-1.5 font-semibold text-neutral-200">MCP</h3>
-              <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2">
+              <h3 className="mb-2.5 text-base font-semibold text-neutral-100">MCP</h3>
+              <div className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-3.5">
                 <label htmlFor="set-mcp-enabled">{t('dialogs.mcpEnabled')}</label>
                 <input
                   id="set-mcp-enabled"
@@ -687,7 +693,7 @@ export function SettingsDialog() {
                     onChange={(e) => void setMcp('mcp.token', e.target.value)}
                   />
                   <button
-                    className="shrink-0 rounded px-2 py-0.5 text-neutral-400 hover:bg-neutral-800"
+                    className="shrink-0 rounded-md px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
                     onClick={() => {
                       const tok = Array.from(crypto.getRandomValues(new Uint8Array(16)))
                         .map((b) => b.toString(16).padStart(2, '0'))
@@ -774,7 +780,7 @@ export function SettingsDialog() {
                         <button
                           key={label}
                           title={hint}
-                          className="rounded bg-neutral-800 px-2 py-0.5 text-neutral-300 hover:bg-neutral-700"
+                          className="rounded-md bg-neutral-800 px-3 py-1.5 text-neutral-200 hover:bg-neutral-700"
                           onClick={() => {
                             void writeText(json)
                               .then(() =>
@@ -798,7 +804,9 @@ export function SettingsDialog() {
 
           {tab === 'shortcuts' && (
             <section>
-              <h3 className="mb-1.5 font-semibold text-neutral-200">{t('dialogs.shortcuts')}</h3>
+              <h3 className="mb-2.5 text-base font-semibold text-neutral-100">
+                {t('dialogs.shortcuts')}
+              </h3>
               <div className="mb-2 flex items-center gap-2">
                 <label htmlFor="set-scheme">{t('dialogs.keymapScheme')}</label>
                 <select
@@ -816,8 +824,8 @@ export function SettingsDialog() {
                 <tbody>
                   {KEY_ACTIONS.map((a) => (
                     <tr key={a.id} className="border-t border-neutral-800/50">
-                      <td className="py-0.5 pr-2">{a.label}</td>
-                      <td className="py-0.5 text-right font-mono text-neutral-400">
+                      <td className="py-1.5 pr-2">{a.label}</td>
+                      <td className="py-1.5 text-right font-mono text-neutral-400">
                         {bindings[a.id]}
                         {a.alias ? ` / ${a.alias}` : ''}
                       </td>

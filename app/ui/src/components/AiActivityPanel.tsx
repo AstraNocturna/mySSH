@@ -63,7 +63,7 @@ export function AiActivityPanel() {
   const stopBtn = (kind: AiStopKind, id: string, label: MsgKey) => (
     <button
       type="button"
-      className="shrink-0 rounded border border-red-800 px-1.5 text-[11px] text-red-300 hover:bg-red-900/60"
+      className="shrink-0 rounded border border-red-800 px-1.5 text-xs text-red-300 hover:bg-red-900/60"
       onClick={() => doStop(kind, id)}
     >
       {t(label)}
@@ -83,7 +83,7 @@ export function AiActivityPanel() {
 
   return (
     <aside
-      className="fixed right-2 top-[4.5rem] z-40 flex max-h-[calc(100vh-6rem)] w-80 flex-col rounded-lg border border-neutral-700 bg-neutral-900/95 text-xs text-neutral-200 shadow-xl"
+      className="myssh-tool fixed right-2 top-[4.5rem] z-40 flex max-h-[calc(100vh-6rem)] w-80 flex-col rounded-lg border border-neutral-700 bg-neutral-900/95 text-xs text-neutral-200 shadow-xl"
       aria-label={t('chrome.aiActivityLabel')}
     >
       <header className="flex items-center justify-between border-b border-neutral-800 px-3 py-1.5">
@@ -126,7 +126,7 @@ export function AiActivityPanel() {
                 </span>
                 <button
                   type="button"
-                  className="shrink-0 rounded border border-neutral-600 px-1.5 text-[11px] hover:bg-neutral-800 disabled:opacity-40"
+                  className="shrink-0 rounded border border-neutral-600 px-1.5 text-xs hover:bg-neutral-800 disabled:opacity-40"
                   title={t('chrome.aiJumpTitle')}
                   disabled={!rec}
                   onClick={() => rec && useAppStore.getState().connectOrActivate(rec.id, rec.name)}
@@ -143,7 +143,7 @@ export function AiActivityPanel() {
                       className="flex w-full items-center gap-1.5 rounded px-1 text-left hover:bg-neutral-800"
                       onClick={() => focusApproval(a.id)}
                     >
-                      <span className="shrink-0 rounded bg-amber-600 px-1 text-[10px] text-white">
+                      <span className="shrink-0 rounded bg-amber-600 px-1 text-[11px] text-white">
                         {t('chrome.aiPanelPending')}
                       </span>
                       <span className="min-w-0 flex-1 truncate font-mono">
@@ -154,7 +154,7 @@ export function AiActivityPanel() {
                 ))}
                 {ex.map((e) => (
                   <li key={e.execId} className="flex items-center gap-1.5" title={e.command}>
-                    <span className="shrink-0 rounded bg-purple-700/80 px-1 text-[10px] text-white">
+                    <span className="shrink-0 rounded bg-purple-700/80 px-1 text-[11px] text-white">
                       {t('chrome.aiPanelExec')}
                     </span>
                     <span className="min-w-0 flex-1 truncate font-mono">
@@ -168,7 +168,7 @@ export function AiActivityPanel() {
                 ))}
                 {jb.map((j) => (
                   <li key={j.jobId} className="flex items-center gap-1.5" title={j.command}>
-                    <span className="shrink-0 rounded bg-sky-800 px-1 text-[10px] text-white">
+                    <span className="shrink-0 rounded bg-sky-800 px-1 text-[11px] text-white">
                       {t('chrome.aiPanelJob')}
                     </span>
                     <span className="min-w-0 flex-1 truncate font-mono">

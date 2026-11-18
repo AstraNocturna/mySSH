@@ -100,12 +100,12 @@ function PolicyListEditor({
   };
 
   return (
-    <section className="rounded-lg border border-neutral-800 bg-neutral-950/40 p-3">
+    <section className="rounded-lg border border-neutral-800 bg-neutral-950/40 p-4">
       <div className="mb-1 flex items-center gap-2">
-        <h3 className="font-semibold text-neutral-100">{t(title)}</h3>
+        <h3 className="text-base font-semibold text-neutral-100">{t(title)}</h3>
         {list && <span className="tabular-nums text-neutral-500">{list.length}</span>}
         <span
-          className={`rounded-full px-1.5 text-[10px] leading-4 ${
+          className={`rounded-full px-2 text-xs leading-5 ${
             customized ? 'bg-blue-600/20 text-blue-300' : 'bg-neutral-800 text-neutral-500'
           }`}
         >
@@ -113,7 +113,7 @@ function PolicyListEditor({
         </span>
         <button
           type="button"
-          className="ml-auto flex items-center gap-1 rounded-md px-2 py-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+          className="ml-auto flex items-center gap-1.5 rounded-md px-2.5 py-1 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
           disabled={custom === null}
           onClick={reset}
         >
@@ -133,12 +133,12 @@ function PolicyListEditor({
             {list.map((cmd) => (
               <span
                 key={cmd}
-                className={`flex items-center gap-0.5 rounded-md border py-0.5 pr-0.5 pl-1.5 font-mono text-[11px] ${chip}`}
+                className={`flex items-center gap-0.5 rounded-md border py-1 pr-1 pl-2 font-mono text-xs ${chip}`}
               >
                 {cmd}
                 <button
                   type="button"
-                  className="flex h-4 w-4 items-center justify-center rounded opacity-60 hover:bg-black/20 hover:opacity-100"
+                  className="flex h-5 w-5 items-center justify-center rounded opacity-60 hover:bg-black/20 hover:opacity-100"
                   aria-label={t('dialogs.policyRemoveAria', { cmd })}
                   title={t('dialogs.policyRemoveAria', { cmd })}
                   onClick={() => save(list.filter((x) => x !== cmd))}
@@ -150,7 +150,7 @@ function PolicyListEditor({
           </div>
           <div className="flex items-center gap-2">
             <input
-              className="h-7 min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-800 px-2 font-mono text-xs text-neutral-200"
+              className="h-9 min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-800 px-2.5 font-mono text-sm text-neutral-200"
               placeholder={t('dialogs.policyAddPh')}
               aria-label={t('dialogs.policyAddAria', { list: t(title) })}
               spellCheck={false}
@@ -165,7 +165,7 @@ function PolicyListEditor({
             />
             <button
               type="button"
-              className="flex h-7 items-center gap-1 rounded-md bg-blue-600 px-3 text-white hover:bg-blue-500 disabled:opacity-40"
+              className="flex h-9 items-center gap-1.5 rounded-md bg-blue-600 px-4 text-white hover:bg-blue-500 disabled:opacity-40"
               disabled={!draft.trim()}
               onClick={add}
             >

@@ -63,6 +63,25 @@ body,
   text-rendering: optimizeLegibility;
 }
 
+/* 根字号固定 13px，Tailwind 的 rem 系尺寸（text-xs≈9.75px、h-7≈22.75px）在工具面板里过小。
+   .myssh-tool 内改按 16px 基准换算间距与字号，其余界面密度不变；
+   对话框遮罩与菜单即便渲染在工具面板子树里，也重置回默认，与其他对话框保持一致。 */
+.myssh-tool {
+  --spacing: 4px;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+}
+.myssh-backdrop,
+.myssh-menu-glass {
+  --spacing: 0.25rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+}
+
 /* ---------- 全局交互质感 ----------
    放进 base 层：组件上的 Tailwind 工具类（utilities 层）一律优先；只过渡颜色类属性，不用 all。 */
 @layer base {

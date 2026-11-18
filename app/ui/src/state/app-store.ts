@@ -131,6 +131,8 @@ export function aiClientItems(c: AiClientCounts): string {
 
 /** 底部 dock 页签（DevTools 风格工具面板）；单值天然互斥 */
 export type DockTab = 'sftp' | 'metrics' | 'tunnel' | 'transfer';
+/** 底部 dock 承载的页签（监控在右侧面板、隧道在弹出面板） */
+export type BottomDockTab = 'sftp' | 'transfer';
 /** 通知分级（批次一 7.7）：success/info 短时自动消失，warning 较长，error 常驻手动关 */
 export type NotificationLevel = 'success' | 'info' | 'warning' | 'error';
 
@@ -376,13 +378,18 @@ interface AppStore {
 
   /** 内部：订阅去重标记 */
   _tunnelsSubscribed: boolean;
-  /** 底部 dock（窗口级）：当前激活的工具页签；null = 收起。
-   *  单值天然互斥（替代原 sftpOpen/metricsOpen 逐标签互斥）。
-   *  'transfer' 与 transfer-store.open 联动（openDock/closeDock 内同步，订阅逻辑不变） */
-  dockTab: DockTab | null;
+  /** 工具面板（窗口级）按位置分三处，互不抢占：
+   *  - 底部 dock：dockTab = 'sftp' | 'transfer'（二者互斥）；'transfer' 与 transfer-store.open 联动
+   *  - 右侧面板：sideTab = 'metrics'
+   *  - 隧道弹出面板：tunnelOpen
+   *  三处可同时打开；openDock/closeDock/toggleDock 按 DockTab 路由到对应位置。 */
+  dockTab: BottomDockTab | null;
+  sideTab: 'metrics' | null;
+  tunnelOpen: boolean;
   openDock(tab: DockTab): void;
-  closeDock(): void;
-  /** 同页签再次触发 = 关闭 */
+  /** 不传 = 关闭底部 dock（SFTP/传输中心面板内的关闭按钮）；传入则关闭该面板所在位置 */
+  closeDock(tab?: DockTab): void;
+  /** 面板已打开时再次触发 = 关闭 */
   toggleDock(tab: DockTab): void;
   /** 应用设置（settings KV 全量缓存；启动时 loadSettings 拉一次） */
   settings: Record<string, unknown>;
@@ -618,6 +625,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     tunnelDefs: [],
     _tunnelsSubscribed: false,
     dockTab: null,
+    sideTab: null,
+    tunnelOpen: false,
     settings: {},
     settingsLoaded: false,
     settingsOpen: false,
@@ -658,19 +667,38 @@ export const useAppStore = create<AppStore>((set, get) => {
         );
         return;
       }
-      set({ dockTab: tab });
-      // 传输中心内容仍订阅 transfer-store.open（保持订阅建立逻辑不变）
-      useTransferStore.getState().setOpen(tab === 'transfer');
+      if (tab === 'metrics') {
+        set({ sideTab: 'metrics' });
+      } else if (tab === 'tunnel') {
+        set({ tunnelOpen: true });
+      } else {
+        set({ dockTab: tab });
+        // 传输中心内容仍订阅 transfer-store.open（保持订阅建立逻辑不变）
+        useTransferStore.getState().setOpen(tab === 'transfer');
+      }
     },
 
-    closeDock: () => {
-      set({ dockTab: null });
-      useTransferStore.getState().setOpen(false);
+    closeDock: (tab) => {
+      if (tab === 'metrics') {
+        set({ sideTab: null });
+      } else if (tab === 'tunnel') {
+        set({ tunnelOpen: false });
+      } else {
+        set({ dockTab: null });
+        useTransferStore.getState().setOpen(false);
+      }
     },
 
     toggleDock: (tab) => {
-      if (get().dockTab === tab) get().closeDock();
-      else get().openDock(tab);
+      const s = get();
+      const open =
+        tab === 'metrics'
+          ? s.sideTab === 'metrics'
+          : tab === 'tunnel'
+            ? s.tunnelOpen
+            : s.dockTab === tab;
+      if (open) s.closeDock(tab);
+      else s.openDock(tab);
     },
 
     subscribeMcpUi: () => {

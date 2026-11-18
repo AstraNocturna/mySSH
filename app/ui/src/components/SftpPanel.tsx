@@ -9,6 +9,7 @@ import { useTransferStore } from '../state/transfer-store';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ContextMenu, type MenuItem } from './ContextMenu';
 import { Dialog } from './Dialog';
+import { Icon } from './Icon';
 import { PathBar } from './PathBar';
 import {
   EMPTY_NAV_HIST,
@@ -185,13 +186,13 @@ function FilePane(p: PaneProps) {
     });
   }, [p.entries, filter, showHidden, sortKey, sortAsc]);
 
-  // 虚拟滚动（PR-10）：5 万项目录 DOM 有界。行高固定（text-xs + py-0.5 ≈ 21px），
+  // 虚拟滚动（PR-10）：5 万项目录 DOM 有界。行高固定（text-sm + py-1 ≈ 28px），
   // 方向键焦点跟随经 data-idx 查询（虚拟化后 DOM 兄弟关系不再等于列表相邻）。
   const listRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: visible.length,
     getScrollElement: () => listRef.current,
-    estimateSize: () => 21,
+    estimateSize: () => 28,
     overscan: 30,
   });
   const focusRow = (i: number) => {
@@ -209,7 +210,9 @@ function FilePane(p: PaneProps) {
     }
   };
   const sortMark = (key: 'name' | 'size' | 'mtime') =>
-    sortKey === key ? (sortAsc ? ' ▲' : ' ▼') : '';
+    sortKey === key ? (
+      <Icon name="chevronDown" size={12} className={sortAsc ? 'rotate-180' : ''} />
+    ) : null;
   const hbtn = 'cursor-pointer select-none hover:text-neutral-300';
   return (
     <div
@@ -254,44 +257,64 @@ function FilePane(p: PaneProps) {
         onNavigate={p.onNavigate}
         fetchSuggestions={p.fetchSuggestions}
       />
-      {p.quickSlots}
-      {/* 过滤 + 隐藏文件开关（批次十一 5） */}
-      <div className="flex items-center gap-2 border-b border-neutral-800 px-2 py-0.5 text-neutral-500">
-        <input
-          aria-label={t('panels.filterFiles')}
-          className="min-w-0 flex-1 rounded border border-neutral-700 bg-neutral-800 px-1.5 py-0.5 text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-blue-600"
-          placeholder={t('panels.filterPlaceholder')}
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
-        <label className="flex shrink-0 cursor-pointer items-center gap-1">
-          <input
-            type="checkbox"
-            checked={showHidden}
-            onChange={(e) => setShowHidden(e.target.checked)}
+      {/* 一行合并：过滤 + 快捷位置 + 隐藏文件开关（原三行） */}
+      <div className="flex items-center gap-2 border-b border-neutral-800 px-2 py-1 text-neutral-500">
+        <div className="relative w-36 shrink-0">
+          <Icon
+            name="search"
+            size={14}
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-neutral-500"
           />
-          {t('panels.showHidden')}
-        </label>
+          <input
+            aria-label={t('panels.filterFiles')}
+            className="h-7 w-full rounded border border-neutral-700 bg-neutral-800 pr-2 pl-7 text-sm text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-blue-600"
+            placeholder={t('panels.filterPlaceholder')}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+        </div>
+        {p.quickSlots}
+        <button
+          type="button"
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-neutral-800 ${
+            showHidden ? 'bg-neutral-800 text-blue-400' : 'text-neutral-400 hover:text-neutral-200'
+          }`}
+          aria-pressed={showHidden}
+          aria-label={t('panels.showHidden')}
+          title={t('panels.showHidden')}
+          onClick={() => setShowHidden((v) => !v)}
+        >
+          <Icon name={showHidden ? 'eye' : 'eyeOff'} size={16} />
+        </button>
       </div>
       {/* 列头（批次十一 4：名称/大小/修改时间可点排序，目录恒排文件前） */}
-      <div className="flex items-center gap-2 border-b border-neutral-800 px-2 py-0.5 text-neutral-500">
-        <span className="w-4 shrink-0" />
-        <button className={`${hbtn} min-w-0 flex-1 text-left`} onClick={() => sortBy('name')}>
+      <div className="flex items-center gap-2 border-b border-neutral-800 px-2 py-1 text-xs text-neutral-500">
+        <span className="w-5 shrink-0" />
+        <button
+          className={`${hbtn} flex min-w-0 flex-1 items-center gap-0.5 text-left`}
+          onClick={() => sortBy('name')}
+        >
           {t('panels.colName')}
           {sortMark('name')}
         </button>
-        <button className={`${hbtn} w-16 shrink-0 text-right`} onClick={() => sortBy('size')}>
+        <button
+          className={`${hbtn} flex w-20 shrink-0 items-center justify-end gap-0.5`}
+          onClick={() => sortBy('size')}
+        >
           {t('panels.colSize')}
           {sortMark('size')}
         </button>
-        <button className={`${hbtn} w-16 shrink-0 text-right`} onClick={() => sortBy('mtime')}>
+        <button
+          className={`${hbtn} flex w-24 shrink-0 items-center justify-end gap-0.5`}
+          onClick={() => sortBy('mtime')}
+        >
           {t('panels.colModified')}
           {sortMark('mtime')}
         </button>
         {p.side === 'remote' && (
           <span className="w-32 shrink-0 text-right">{t('panels.colPerms')}</span>
         )}
-      </div>
+      </div>{' '}
       <div
         ref={listRef}
         className="min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
@@ -403,7 +426,7 @@ function FilePane(p: PaneProps) {
                   }
                   p.onRowKey(e, ev);
                 }}
-                className={`flex cursor-pointer items-center gap-2 px-2 py-0.5 text-xs ${
+                className={`flex cursor-pointer items-center gap-2 px-2 py-1 text-sm ${
                   rowDrop === e.path
                     ? 'bg-blue-900/60 text-neutral-100 outline outline-1 outline-blue-600'
                     : p.sel.has(e.path)
@@ -411,21 +434,27 @@ function FilePane(p: PaneProps) {
                       : 'text-neutral-300 outline-none hover:bg-neutral-800 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500'
                 }`}
               >
-                <span className="w-4 shrink-0 text-center">
-                  {e.kind === 'dir' ? '📁' : e.kind === 'symlink' ? '🔗' : '📄'}
+                <span className="flex w-5 shrink-0 items-center justify-center">
+                  {e.kind === 'dir' ? (
+                    <Icon name="folder" size={17} className="text-amber-400" />
+                  ) : e.kind === 'symlink' ? (
+                    <Icon name="link" size={16} className="text-cyan-400" />
+                  ) : (
+                    <Icon name="file" size={16} className="text-neutral-400" />
+                  )}
                 </span>
                 <span className="min-w-0 flex-1 truncate" title={e.name}>
                   {e.name}
                 </span>
-                <span className="w-16 shrink-0 text-right text-neutral-500 tabular-nums">
+                <span className="w-20 shrink-0 text-right text-xs text-neutral-500 tabular-nums">
                   {e.kind === 'dir' ? '' : fmtSize(e.size)}
                 </span>
-                <span className="w-16 shrink-0 text-right text-neutral-600 tabular-nums">
+                <span className="w-24 shrink-0 text-right text-xs text-neutral-500 tabular-nums">
                   {fmtTime(e.mtime)}
                 </span>
                 {p.side === 'remote' && (
                   <span
-                    className="w-32 shrink-0 text-right text-neutral-600"
+                    className="w-32 shrink-0 text-right text-xs text-neutral-500"
                     title={permsTitle(e.permissions)}
                   >
                     {fmtPermsCn(e.permissions)}
@@ -436,7 +465,7 @@ function FilePane(p: PaneProps) {
           })}
         </div>
         {!p.loading && visible.length === 0 && (
-          <div className="px-3 py-4 text-xs text-neutral-600">
+          <div className="px-3 py-4 text-sm text-neutral-500">
             {p.entries.length === 0 ? t('panels.emptyDir') : t('panels.noMatch')}
           </div>
         )}
@@ -832,7 +861,7 @@ export function SftpPanel({ tabId }: { tabId: string }) {
     return (
       <div className="bg-neutral-900 px-3 py-2 text-xs text-neutral-500">
         {isLocalSession ? t('panels.sftpLocalGuard') : t('panels.sftpInlineGuard')}
-        <button className="ml-2 text-neutral-400" onClick={closeDock}>
+        <button className="ml-2 text-neutral-400" onClick={() => closeDock()}>
           {t('panels.close')}
         </button>
       </div>
@@ -1401,9 +1430,12 @@ export function SftpPanel({ tabId }: { tabId: string }) {
   };
 
   const qbtn =
-    'rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-40';
+    'h-7 shrink-0 rounded px-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40 disabled:hover:bg-transparent';
+  const favAddBtn =
+    'flex h-7 w-7 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-amber-300 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-neutral-400';
+  const quickWrap = 'flex min-w-0 flex-1 items-center gap-1 overflow-x-auto';
   const localQuickSlots = (
-    <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-800 px-2 py-0.5">
+    <div className={quickWrap}>
       <button
         className={qbtn}
         title={t('panels.driveEnum')}
@@ -1425,7 +1457,7 @@ export function SftpPanel({ tabId }: { tabId: string }) {
       {localFavs.map((p) => (
         <button
           key={p}
-          className={`${qbtn} max-w-32 truncate`}
+          className={`${qbtn} max-w-36 truncate`}
           title={t('panels.favRemoveTip', { path: p })}
           onClick={() => void navSide('local', p)}
           onContextMenu={(e) => {
@@ -1437,24 +1469,25 @@ export function SftpPanel({ tabId }: { tabId: string }) {
         </button>
       ))}
       <button
-        className={`${qbtn} shrink-0`}
+        className={favAddBtn}
         title={
           localPath ? t('panels.favAddTip', { path: localPath }) : t('panels.favAddDisabledTip')
         }
+        aria-label={t('panels.favAdd')}
         disabled={!localPath || localFavs.includes(localPath)}
         onClick={addLocalFav}
       >
-        ☆ {t('panels.favAdd')}
+        <Icon name="star" size={16} />
       </button>
     </div>
   );
 
   const remoteQuickSlots = (
-    <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-800 px-2 py-0.5">
+    <div className={quickWrap}>
       {remoteFavs.map((p) => (
         <button
           key={p}
-          className={`${qbtn} max-w-32 truncate`}
+          className={`${qbtn} max-w-36 truncate`}
           title={t('panels.favRemoveTip', { path: p })}
           onClick={() => void navSide('remote', p)}
           onContextMenu={(e) => {
@@ -1466,12 +1499,13 @@ export function SftpPanel({ tabId }: { tabId: string }) {
         </button>
       ))}
       <button
-        className={`${qbtn} shrink-0`}
+        className={favAddBtn}
         title={t('panels.favAddTip', { path: remotePath })}
+        aria-label={t('panels.favAdd')}
         disabled={remoteFavs.includes(remotePath)}
         onClick={addRemoteFav}
       >
-        ☆ {t('panels.favAdd')}
+        <Icon name="star" size={16} />
       </button>
     </div>
   );
@@ -1480,15 +1514,17 @@ export function SftpPanel({ tabId }: { tabId: string }) {
 
   const localSel = selEntries('local');
   const remoteSel = selEntries('remote');
-  const toolBtn = 'rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-800 disabled:opacity-40';
+  const toolBtn =
+    'flex h-8 shrink-0 items-center gap-1.5 rounded px-2.5 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40 disabled:hover:bg-transparent';
+  const sep = 'mx-1 h-5 w-px shrink-0 bg-neutral-800';
 
   return (
-    <div ref={rootRef} className="flex h-full min-h-0 flex-col bg-neutral-900 text-xs">
-      {/* 工具行 */}
-      <div className="flex items-center gap-2 border-b border-neutral-800 px-2 py-1">
-        <span className="font-medium text-neutral-300">SFTP</span>
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col bg-neutral-900 text-sm">
+      {/* 工具行：导航 / 新建 / 文件操作 / 传输 分组，按钮 ≥32px 高 */}
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-neutral-800 px-2 py-1.5 whitespace-nowrap">
+        <span className="mr-1 font-semibold text-neutral-200">SFTP</span>
         <label
-          className="flex items-center gap-1 text-neutral-500"
+          className="mr-1 flex shrink-0 cursor-pointer items-center gap-1.5 text-neutral-400"
           title={t('panels.followTerminalTip')}
         >
           <input
@@ -1498,6 +1534,7 @@ export function SftpPanel({ tabId }: { tabId: string }) {
           />
           {t('panels.followTerminal')}
         </label>
+        <span className={sep} />
         <button
           className={toolBtn}
           onClick={() => {
@@ -1505,8 +1542,24 @@ export function SftpPanel({ tabId }: { tabId: string }) {
             void refreshRemote();
           }}
         >
+          <Icon name="refresh" size={16} />
           {t('panels.refresh')}
         </button>
+        <button
+          className={toolBtn}
+          onClick={() => setPrompt({ action: 'mkdir', side: sel.side, value: '' })}
+        >
+          <Icon name="folderPlus" size={16} />
+          {t('panels.newFolder')}
+        </button>
+        <button
+          className={toolBtn}
+          onClick={() => setPrompt({ action: 'touch', side: sel.side, value: '' })}
+        >
+          <Icon name="filePlus" size={16} />
+          {t('panels.newFile')}
+        </button>
+        <span className={sep} />
         <button
           className={toolBtn}
           disabled={remoteSel.length !== 1 && localSel.length !== 1}
@@ -1516,6 +1569,7 @@ export function SftpPanel({ tabId }: { tabId: string }) {
             if (e) setPrompt({ action: 'rename', side, value: e.name });
           }}
         >
+          <Icon name="pencil" size={16} />
           {t('panels.renamePlain')}
         </button>
         <button
@@ -1529,48 +1583,53 @@ export function SftpPanel({ tabId }: { tabId: string }) {
             })
           }
         >
+          <Icon name="lock" size={16} />
           {t('panels.permissions')}
         </button>
         <button
-          className={`${toolBtn} text-red-400`}
+          className={`${toolBtn} enabled:text-red-400 enabled:hover:bg-red-950/50`}
           disabled={localSel.length === 0 && remoteSel.length === 0}
           onClick={() => {
             const side = remoteSel.length > 0 ? 'remote' : 'local';
             setConfirmDel(side === 'remote' ? remoteSel : localSel);
           }}
         >
+          <Icon name="trash" size={16} />
           {t('panels.delete')}
         </button>
+        <span className={sep} />
         <button
-          className={toolBtn}
+          className={`${toolBtn} enabled:text-blue-300`}
           disabled={localSel.length === 0}
           onClick={() => uploadPaths(localSel.map((e) => e.path))}
         >
+          <Icon name="upload" size={16} />
           {localSel.length > 1
             ? t('panels.uploadToCount', { count: localSel.length })
             : t('panels.uploadTo')}
         </button>
         <button
-          className={toolBtn}
+          className={`${toolBtn} enabled:text-blue-300`}
           disabled={remoteSel.length === 0}
           onClick={() => downloadPaths(remoteSel.map((e) => e.path))}
         >
+          <Icon name="download" size={16} />
           {remoteSel.length > 1
             ? t('panels.downloadFromCount', { count: remoteSel.length })
             : t('panels.downloadFrom')}
         </button>
         <button
-          className="ml-auto rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-800"
-          onClick={closeDock}
+          className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+          onClick={() => closeDock()}
           aria-label={t('panels.closeSftp')}
+          title={t('panels.closeSftp')}
         >
-          ×
+          <Icon name="x" size={18} />
         </button>
       </div>
-
       {/* 内联输入（mkdir/rename/chmod/move） */}
       {prompt && (
-        <div className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-850 px-2 py-1">
+        <div className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-850 px-2 py-1.5">
           <span className="text-neutral-400">
             {prompt.action === 'mkdir'
               ? t('panels.promptDirName', {
@@ -1587,7 +1646,7 @@ export function SftpPanel({ tabId }: { tabId: string }) {
                     : t('panels.promptPerms')}
           </span>
           <input
-            className="w-56 rounded border border-neutral-700 bg-neutral-800 px-1.5 py-0.5 text-neutral-200 outline-none focus:border-blue-600"
+            className="h-8 w-64 rounded border border-neutral-700 bg-neutral-800 px-2 text-neutral-200 outline-none focus:border-blue-600"
             value={prompt.value}
             autoFocus
             onChange={(e) => setPrompt({ ...prompt, value: e.target.value })}
@@ -1597,12 +1656,15 @@ export function SftpPanel({ tabId }: { tabId: string }) {
             }}
           />
           <button
-            className="rounded bg-blue-700 px-2 py-0.5 text-white"
+            className="h-8 rounded bg-blue-700 px-3 text-white hover:bg-blue-600"
             onClick={() => void runPrompt()}
           >
             {t('panels.ok')}
           </button>
-          <button className="rounded px-2 py-0.5 text-neutral-400" onClick={() => setPrompt(null)}>
+          <button
+            className="h-8 rounded px-3 text-neutral-300 hover:bg-neutral-800"
+            onClick={() => setPrompt(null)}
+          >
             {t('panels.cancel')}
           </button>
         </div>
@@ -1796,7 +1858,7 @@ export function SftpPanel({ tabId }: { tabId: string }) {
       </div>
 
       {/* 传输摘要（批次六 5）：完整队列/逐任务控制在 dock 的「传输中心」页签 */}
-      <div className="flex items-center gap-2 border-t border-neutral-800 px-2 py-1 text-neutral-500">
+      <div className="flex items-center gap-2 border-t border-neutral-800 px-2 py-1.5 text-neutral-400">
         <span>
           {t('panels.transfers')}
           {liveCount > 0 && t('panels.transferActiveSuffix', { count: liveCount })}
@@ -1808,9 +1870,10 @@ export function SftpPanel({ tabId }: { tabId: string }) {
           {liveCount === 0 && failedCount === 0 && t('panels.transferIdleSuffix')}
         </span>
         <button
-          className="rounded px-1.5 py-0.5 text-neutral-400 hover:bg-neutral-800"
+          className="flex h-7 items-center gap-1.5 rounded px-2 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
           onClick={() => useAppStore.getState().openDock('transfer')}
         >
+          <Icon name="transfer" size={15} />
           {t('panels.openTransferManager')}
         </button>
       </div>

@@ -100,7 +100,7 @@ export function ThemeStudio() {
           ))}
         </select>
         <button
-          className="rounded bg-neutral-800 px-2 py-1 text-neutral-300 hover:bg-neutral-700"
+          className="rounded-md bg-neutral-800 px-3 py-1.5 text-neutral-200 hover:bg-neutral-700"
           onClick={applyBase}
         >
           {t('dialogs.studioApply')}
@@ -131,15 +131,13 @@ export function ThemeStudio() {
       <div className="flex gap-4">
         <div className="flex-1">
           {/* 基础色 4 项 */}
-          <h4 className="mb-1.5 font-semibold text-neutral-300">
-            {t('dialogs.studioBasicColors')}
-          </h4>
+          <h4 className="mb-2 font-semibold text-neutral-200">{t('dialogs.studioBasicColors')}</h4>
           <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-1.5">
             {basics.map(([key, label]) => (
               <label key={key} className="flex items-center gap-2">
                 <input
                   type="color"
-                  className="h-6 w-8 cursor-pointer rounded border border-neutral-700 bg-transparent p-0"
+                  className="h-8 w-10 cursor-pointer rounded border border-neutral-700 bg-transparent p-0"
                   value={pick(draft, key)}
                   onChange={(e) => patch({ [key]: e.target.value })}
                 />
@@ -150,14 +148,14 @@ export function ThemeStudio() {
           </div>
 
           {/* ANSI 16 色：两行 8 列 */}
-          <h4 className="mb-1.5 font-semibold text-neutral-300">{t('dialogs.studioAnsiColors')}</h4>
+          <h4 className="mb-2 font-semibold text-neutral-200">{t('dialogs.studioAnsiColors')}</h4>
           <div className="grid grid-cols-8 gap-1.5">
             {ANSI_KEYS.map((key) => (
               <input
                 key={key}
                 type="color"
                 title={key}
-                className="h-7 w-full cursor-pointer rounded border border-neutral-700 bg-transparent p-0"
+                className="h-9 w-full cursor-pointer rounded border border-neutral-700 bg-transparent p-0"
                 value={pick(draft, key)}
                 onChange={(e) => patch({ [key]: e.target.value })}
               />
@@ -167,7 +165,7 @@ export function ThemeStudio() {
 
         {/* 实时预览：迷你终端 mock */}
         <div
-          className="w-52 shrink-0 self-start rounded border border-neutral-700 p-2 font-mono text-[10px] leading-4"
+          className="w-52 shrink-0 self-start rounded border border-neutral-700 p-2 font-mono text-[11px] leading-4"
           style={{ background: pick(draft, 'background'), color: pick(draft, 'foreground') }}
         >
           <div>

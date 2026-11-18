@@ -42,6 +42,8 @@ export const enChrome: Record<keyof typeof zhChrome, string> = {
   'chrome.transferLabel': 'Transfer Center',
   'chrome.tipTransfer': 'Transfer Center (SFTP upload/download queue){active}',
   'chrome.transferActive': ' — {count} in progress',
+  'chrome.tipNeedRemote': 'Open a remote SSH session first',
+  'chrome.tipLocalUnavailable': 'Not available for local sessions',
   'chrome.settingsLabel': 'Settings',
   'chrome.tipSettings': 'Settings{kb}',
   // ---- TabBar ----
@@ -276,6 +278,11 @@ export const enChrome: Record<keyof typeof zhChrome, string> = {
   'chrome.dockTablistAria': 'Tool Panels',
   'chrome.dockTabAria': '{label} Panel',
   'chrome.dockTabDisabledTip': '{label} (remote sessions only)',
+  'chrome.dockMaximize': 'Maximize',
+  'chrome.dockRestore': 'Restore',
+  'chrome.sideDockAria': 'Monitor panel',
+  'chrome.tunnelPopoverAria': 'Tunnel manager',
+  'chrome.tunnelPopoverClose': 'Close tunnel panel',
   'chrome.dockTabTip': '{label}{kb}',
   'chrome.dockClose': 'Close Panel',
   'chrome.dockLocalSftp':

@@ -44,7 +44,7 @@ export function StatusBar() {
 
   return (
     <footer
-      className="flex h-6 shrink-0 items-center gap-4 border-t border-neutral-800 bg-neutral-900 px-3 text-[11px] text-neutral-500"
+      className="myssh-tool flex h-7 shrink-0 items-center gap-5 border-t border-neutral-800 bg-neutral-900 px-3 text-xs text-neutral-400"
       role="status"
       aria-label={t('chrome.statusBarLabel')}
     >
@@ -59,7 +59,7 @@ export function StatusBar() {
         {activeTab && activePane && (
           <>
             <span
-              className={`h-1.5 w-1.5 rounded-full ${
+              className={`h-2 w-2 rounded-full ${
                 activePane.state === 'connected'
                   ? 'bg-green-500'
                   : activePane.state === 'connecting' || activePane.state === 'reconnecting'
@@ -68,7 +68,7 @@ export function StatusBar() {
               }`}
             />
             <span className="min-w-0 truncate">{activeTab.title}</span>
-            <span className="text-neutral-600">
+            <span className="text-neutral-500">
               {PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY]
                 ? t(PANE_STATE_KEY[activePane.state as keyof typeof PANE_STATE_KEY])
                 : activePane.state}

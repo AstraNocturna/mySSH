@@ -873,3 +873,57 @@ describe('MCP agent 终端标签', () => {
     expect(state().recTabs).toEqual({});
   });
 });
+
+describe('app-store 工具面板（按位置分流）', () => {
+  beforeEach(() => {
+    useAppStore.setState({ dockTab: null, sideTab: null, tunnelOpen: false });
+  });
+
+  it('SFTP（底部）、监控（右侧）、隧道（弹出）可同时打开，互不关闭', () => {
+    const s = state();
+    s.openDock('sftp');
+    s.openDock('metrics');
+    s.openDock('tunnel');
+    expect(state().dockTab).toBe('sftp');
+    expect(state().sideTab).toBe('metrics');
+    expect(state().tunnelOpen).toBe(true);
+  });
+
+  it('底部 dock 内 SFTP 与传输中心互斥；切换传输中心不影响监控/隧道', () => {
+    const s = state();
+    s.openDock('metrics');
+    s.openDock('tunnel');
+    s.openDock('sftp');
+    s.openDock('transfer');
+    expect(state().dockTab).toBe('transfer');
+    expect(state().sideTab).toBe('metrics');
+    expect(state().tunnelOpen).toBe(true);
+  });
+
+  it('toggleDock 只关闭同一位置的面板；closeDock() 无参仅关底部', () => {
+    const s = state();
+    s.openDock('sftp');
+    s.openDock('metrics');
+    s.toggleDock('metrics');
+    expect(state().sideTab).toBeNull();
+    expect(state().dockTab).toBe('sftp');
+    s.openDock('tunnel');
+    s.closeDock();
+    expect(state().dockTab).toBeNull();
+    expect(state().tunnelOpen).toBe(true);
+    s.toggleDock('tunnel');
+    expect(state().tunnelOpen).toBe(false);
+  });
+
+  it('本地会话拒绝打开任何 SSH 专属面板', () => {
+    state().connect(spec);
+    const tab = state().tabs[0];
+    useAppStore.setState({
+      tabs: [{ ...tab, target: { kind: 'session', sessionId: 'l', sessionKind: 'local' } }],
+    });
+    for (const p of ['sftp', 'metrics', 'tunnel'] as const) state().openDock(p);
+    expect(state().dockTab).toBeNull();
+    expect(state().sideTab).toBeNull();
+    expect(state().tunnelOpen).toBe(false);
+  });
+});

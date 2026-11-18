@@ -20,7 +20,7 @@ export function Notices() {
   const dismissNotice = useAppStore((s) => s.dismissNotice);
   if (notices.length === 0) return null;
   return (
-    <div className="fixed bottom-10 left-1/2 z-40 flex w-96 max-w-[90vw] -translate-x-1/2 flex-col gap-1.5">
+    <div className="myssh-tool fixed bottom-10 left-1/2 z-40 flex w-[28rem] max-w-[90vw] -translate-x-1/2 flex-col gap-1.5">
       {notices.map((n) => {
         // 局部常量收窄（eslint 禁非空断言）
         const action = n.action;
@@ -29,7 +29,7 @@ export function Notices() {
             key={n.id}
             role={n.level === 'error' ? 'alert' : 'status'}
             aria-live={n.level === 'error' ? 'assertive' : 'polite'}
-            className={`flex items-start gap-2 rounded px-3 py-2 text-xs shadow-lg ${NOTICE_STYLE[n.level]}`}
+            className={`flex items-start gap-2 rounded-md px-4 py-2.5 text-sm shadow-lg ${NOTICE_STYLE[n.level]}`}
           >
             <span className="min-w-0 flex-1 break-words">{n.message}</span>
             {action && (

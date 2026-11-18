@@ -41,7 +41,7 @@ const VIRTUAL_LABELS: { id: 'favorites'; labelKey: MsgKey }[] = [
   { id: 'favorites', labelKey: 'chrome.favorites' },
 ];
 /** 侧栏宽度（px）边界与默认值；持久化于 settings KV ui.sidebarWidth */
-const SIDEBAR_W = { min: 160, max: 480, dflt: 224 } as const;
+const SIDEBAR_W = { min: 200, max: 520, dflt: 256 } as const;
 
 /**
  * 服务器库侧栏（批次二）：
@@ -561,7 +561,7 @@ export function Sidebar() {
             items: ids.length > 1 ? batchMenu(ids) : sessionMenu(rec),
           });
         }}
-        className={`group flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-1 outline-none ${
+        className={`group flex cursor-pointer items-center gap-2.5 rounded-md py-2 pr-1.5 outline-none ${
           selected
             ? 'bg-blue-600/15 ring-1 ring-blue-500/30 ring-inset'
             : 'hover:bg-neutral-800 focus:bg-neutral-800'
@@ -569,7 +569,7 @@ export function Sidebar() {
         style={{
           paddingLeft: `${depth * 12 + 6}px`,
           contentVisibility: 'auto',
-          containIntrinsicSize: 'auto 48px',
+          containIntrinsicSize: 'auto 56px',
         }}
         title={
           rec.kind === 'local'
@@ -580,27 +580,27 @@ export function Sidebar() {
         }
       >
         <span
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-neutral-800 text-neutral-400"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-neutral-800 text-neutral-400"
           style={rec.color ? { backgroundColor: `${rec.color}2e`, color: rec.color } : undefined}
         >
-          <Icon name={rec.kind === 'local' ? 'terminal' : 'server'} size={14} />
+          <Icon name={rec.kind === 'local' ? 'terminal' : 'server'} size={18} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-1 text-[13px] leading-5 text-neutral-100">
+          <span className="flex items-center gap-1.5 text-sm leading-5 font-medium text-neutral-100">
             {online.has(rec.id) && (
               <span
-                className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500"
+                className="h-2 w-2 shrink-0 rounded-full bg-green-500"
                 title={t('chrome.onlineTitle')}
               />
             )}
             {favorites.has(rec.id) && (
               <span className="shrink-0 text-amber-400">
-                <Icon name="star" size={11} className="fill-current" />
+                <Icon name="star" size={13} className="fill-current" />
               </span>
             )}
             <span className="truncate">{rec.name}</span>
             {rec.kind === 'local' && (
-              <span className="shrink-0 rounded bg-neutral-700 px-1 text-[10px] text-neutral-300">
+              <span className="shrink-0 rounded bg-neutral-700 px-1.5 text-xs text-neutral-300">
                 {t('chrome.localBadge')}
               </span>
             )}
@@ -609,12 +609,12 @@ export function Sidebar() {
                 className="shrink-0 text-red-400"
                 title={t('chrome.lastFailed', { message: failed.get(rec.id) ?? '' })}
               >
-                <Icon name="alert" size={12} />
+                <Icon name="alert" size={14} />
               </span>
             )}
           </span>
           {/* AI 徽标放第二行：窄侧栏里让出空间的是主机地址而不是名称 */}
-          <span className="flex items-center gap-1 font-mono text-[11px] leading-4 text-neutral-500">
+          <span className="flex items-center gap-1 font-mono text-xs leading-4 text-neutral-500">
             <AiStatusBadge sessionId={rec.id} status={aiStatus.get(rec.id)} />
             <span className="truncate">
               {rec.kind === 'local'
@@ -628,7 +628,7 @@ export function Sidebar() {
         </span>
         <span className="hidden shrink-0 gap-0.5 group-hover:flex group-focus-within:flex">
           <button
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-400 hover:bg-neutral-700 hover:text-green-400"
+            className="flex h-7 w-7 items-center justify-center rounded text-neutral-400 hover:bg-neutral-700 hover:text-green-400"
             title={t('chrome.connect')}
             aria-label={t('chrome.connect')}
             onClick={(e) => {
@@ -636,10 +636,10 @@ export function Sidebar() {
               connect(rec);
             }}
           >
-            <Icon name="play" size={13} />
+            <Icon name="play" size={15} />
           </button>
           <button
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
+            className="flex h-7 w-7 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
             title={t('chrome.menuEdit')}
             aria-label={t('chrome.menuEdit')}
             onClick={(e) => {
@@ -647,10 +647,10 @@ export function Sidebar() {
               openConnect(rec);
             }}
           >
-            <Icon name="pencil" size={13} />
+            <Icon name="pencil" size={15} />
           </button>
           <button
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
+            className="flex h-7 w-7 items-center justify-center rounded text-neutral-500 hover:bg-neutral-700 hover:text-neutral-200"
             title={t('chrome.moreActions')}
             aria-label={t('chrome.moreActions')}
             onClick={(e) => {
@@ -665,7 +665,7 @@ export function Sidebar() {
               });
             }}
           >
-            <Icon name="more" size={14} />
+            <Icon name="more" size={16} />
           </button>
         </span>
       </div>
@@ -697,11 +697,11 @@ export function Sidebar() {
             setMenu({ x: r.left + 16, y: r.bottom, items: groupMenu(path, count) });
           }
         }}
-        className="group mt-1 flex cursor-pointer select-none items-center rounded-md py-1 pr-1 text-neutral-500 outline-none hover:bg-neutral-800 focus:bg-neutral-800"
+        className="group mt-1.5 flex cursor-pointer select-none items-center rounded-md py-1.5 pr-1 text-neutral-500 outline-none hover:bg-neutral-800 focus:bg-neutral-800"
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
       >
         <button
-          className="mr-1 flex h-4 w-4 shrink-0 items-center justify-center"
+          className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center"
           aria-label={isCollapsed ? t('chrome.expandGroup') : t('chrome.collapseGroup')}
           onClick={() =>
             persistCollapsed(
@@ -709,38 +709,38 @@ export function Sidebar() {
             )
           }
         >
-          <Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={13} strokeWidth={2} />
+          <Icon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={15} strokeWidth={2} />
         </button>
         <span
-          className="min-w-0 flex-1 truncate text-xs font-semibold text-neutral-300"
+          className="min-w-0 flex-1 truncate text-sm font-semibold text-neutral-300"
           title={path}
         >
           {name}
         </span>
-        <span className="shrink-0 rounded-full bg-neutral-800 px-1.5 text-[10px] leading-4 tabular-nums text-neutral-400 group-hover:hidden">
+        <span className="shrink-0 rounded-full bg-neutral-800 px-2 text-xs leading-5 tabular-nums text-neutral-400 group-hover:hidden">
           {count}
         </span>
         <span className="hidden shrink-0 gap-0.5 group-hover:flex">
           <button
-            className="flex h-5 w-5 items-center justify-center rounded hover:text-neutral-200"
+            className="flex h-6 w-6 items-center justify-center rounded hover:text-neutral-200"
             title={t('chrome.newSubgroup')}
             aria-label={t('chrome.newSubgroup')}
             onClick={() => setPrompt({ mode: 'group-new', parent: path, input: '' })}
           >
-            <Icon name="plus" size={13} />
+            <Icon name="plus" size={15} />
           </button>
           <button
-            className="flex h-5 w-5 items-center justify-center rounded hover:text-neutral-200"
+            className="flex h-6 w-6 items-center justify-center rounded hover:text-neutral-200"
             title={t('chrome.rename')}
             aria-label={t('chrome.renameGroupAria')}
             onClick={() =>
               setPrompt({ mode: 'group-rename', path, input: path.split('/').pop() ?? path })
             }
           >
-            <Icon name="pencil" size={12} />
+            <Icon name="pencil" size={14} />
           </button>
           <button
-            className="flex h-5 w-5 items-center justify-center rounded hover:text-red-400"
+            className="flex h-6 w-6 items-center justify-center rounded hover:text-red-400"
             title={t('chrome.menuDeleteGroup')}
             aria-label={t('chrome.menuDeleteGroup')}
             onClick={() => {
@@ -752,7 +752,7 @@ export function Sidebar() {
               }
             }}
           >
-            <Icon name="x" size={13} />
+            <Icon name="x" size={15} />
           </button>
         </span>
       </div>
@@ -761,7 +761,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-r border-neutral-800 bg-neutral-900"
+      className="myssh-tool relative flex shrink-0 flex-col border-r border-neutral-800 bg-neutral-900"
       style={{ width }}
     >
       {/* 右缘拖拽把手：调整侧栏宽度（松手持久化） */}
@@ -780,18 +780,18 @@ export function Sidebar() {
           void setSetting('ui.sidebarWidth', next);
         }}
       />
-      <div className="px-3 pt-3 pb-2 text-[11px] font-semibold tracking-wider text-neutral-500 uppercase">
+      <div className="px-3 pt-3 pb-2 text-xs font-semibold tracking-wider text-neutral-500 uppercase">
         <span>{t('chrome.sessionsHeader')}</span>
       </div>
 
-      <div className="relative px-2 pb-2">
+      <div className="relative px-2.5 pb-2">
         <Icon
           name="search"
-          size={13}
-          className="pointer-events-none absolute top-2 left-4 text-neutral-500"
+          size={16}
+          className="pointer-events-none absolute top-2.5 left-5 text-neutral-500"
         />
         <input
-          className="h-7 w-full rounded-md border border-neutral-800 bg-neutral-950 pr-2 pl-7 text-xs text-neutral-300 placeholder:text-neutral-600"
+          className="h-9 w-full rounded-md border border-neutral-800 bg-neutral-950 pr-2 pl-8 text-sm text-neutral-300 placeholder:text-neutral-600"
           placeholder={t('chrome.searchPlaceholder')}
           aria-label={t('chrome.searchAria')}
           value={query}
@@ -806,7 +806,7 @@ export function Sidebar() {
           return (
             <button
               key={v.id}
-              className={`rounded-full border px-2 py-0.5 text-[11px] ${
+              className={`rounded-full border px-2.5 py-1 text-xs ${
                 virt === v.id
                   ? 'border-blue-500/40 bg-blue-600/20 text-blue-300'
                   : 'border-neutral-800 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300'
