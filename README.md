@@ -92,7 +92,7 @@ You stay in control:
   <img src="guide/images/ai-approval.png" width="640" alt="AI command approval popup">
 </p>
 
-- **See what the AI is doing**: commands the AI runs and their output appear live in a read-only pane under the terminal. The "AI" toolbar button lists everything in progress, each with a stop button.
+- **See what the AI is doing**: commands the AI runs and their output appear live in a read-only pane under the terminal. The "AI" button on the right-hand activity bar lists everything in progress, each with a stop button.
 - **Traceable afterwards**: every action goes into a tamper-evident audit log, AI-controlled terminals are recorded, and files the AI changed can be rolled back with one click.
 - **Disconnect means hands off**: when the AI client closes, its unfinished commands, pending requests and open terminals are cleaned up automatically.
 

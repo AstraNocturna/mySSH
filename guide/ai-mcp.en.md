@@ -108,7 +108,7 @@ Each session allows 60 calls per minute by default (setting key `mcp.rate_limit_
 
 - **Command mirror**: commands the AI runs with `ssh_exec`, their live output and exit code appear in a read-only split pane under that session's terminal, without touching the terminal you are using. Turn it off in Settings → MCP.
 - **AI terminals are normal tabs**: terminals the AI opens show up as regular tabs you can watch. The AI pauses while you type, and you can right-click to take back control any time. You can also "Share with AI" one of your own tabs.
-- **AI activity panel**: the "AI" toolbar button lists pending approvals, running commands, background jobs and AI terminals per session, each with a stop button. Tabs and sidebar rows show "AI running" / "pending" badges.
+- **AI activity panel**: the "AI" button on the right-hand activity bar lists pending approvals, running commands, background jobs and AI terminals per session, each with a stop button. Tabs and sidebar rows show "AI running" / "pending" badges.
 
 ## Automatic cleanup when the AI disconnects
 
